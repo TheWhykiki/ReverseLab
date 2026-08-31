@@ -1,0 +1,44 @@
+# ReverseLab
+
+ReverseLab is a clean-room, tempo-synchronised stereo reverse effect for Cubase on macOS. It is an independent private project and does not contain Retrograde code, artwork, identifiers, or presets.
+
+## Build
+
+```sh
+cmake -S . -B build -G Xcode -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release --target ReverseLab ReverseLabTests
+ctest --test-dir build -C Release --output-on-failure
+```
+
+The project builds a universal `arm64`/`x86_64` VST3. Install it only after tests pass:
+
+```sh
+./scripts/install-local.sh Release
+```
+
+The currently verified private installation uses the user-level VST3 directory, which Cubase scans without administrator privileges:
+
+`~/Library/Audio/Plug-Ins/VST3/ReverseLab.vst3`
+
+## Controls
+
+- Tempo-synchronised or free-time stereo reverse segments
+- Linked or independent left/right segment lengths
+- Reverse speed, crossfade, equal-power dry/wet, and output gain
+- Freeze, retrigger, stable feedback, high/low-pass filtering
+- Stereo offset and deterministic randomisation
+- Six factory programs and full Cubase automation/state restoration
+
+Changing segment length changes the reported plug-in latency. Cubase compensates other tracks, while ReverseLab delays its dry path internally to maintain alignment.
+
+## Compatibility
+
+ReverseLab intentionally uses its own bundle and VST3 identifiers. It cannot replace Retrograde instances in existing projects. Keep Retrograde archived for Rosetta migration and render old tracks to audio.
+
+## Verified release
+
+- JUCE 8.0.15, VST3 SDK 3.8
+- Universal `arm64` and `x86_64`
+- Ad-hoc signed for private local use
+- Cubase 15 `vstscanner` exit code 0
+- Automated DSP tests pass for reversal, feedback stability, freeze, and deterministic randomisation

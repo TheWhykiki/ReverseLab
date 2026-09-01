@@ -84,9 +84,12 @@ void ReverseEngine::beginSegment(int channel, int requestedLength, const EngineS
                                                 * settings.randomAmount * 0.5f * head.activeLength);
     const auto channelOffset = static_cast<int>(stereo * 0.5f * head.activeLength);
     head.segmentEnd = wrap(writePosition - 1 - randomOffset - channelOffset);
+    head.captureAge = wrap(writePosition - head.segmentEnd);
     head.phase = 0.0f;
     head.readOffset = 0.0f;
     head.transitionPhase = 0.0f;
+    head.lastRead = 0.0f;
+    head.readExhausted = false;
     head.nextPrepared = false;
 }
 
@@ -100,7 +103,25 @@ void ReverseEngine::prepareNextSegment(int channel, int requestedLength, const E
                                                 * settings.randomAmount * 0.5f * head.nextLength);
     const auto channelOffset = static_cast<int>(stereo * 0.5f * head.nextLength);
     head.nextEnd = wrap(writePosition - 1 - randomOffset - channelOffset);
+    head.nextCaptureAge = wrap(writePosition - head.nextEnd);
+    head.nextLastRead = 0.0f;
+    head.nextReadExhausted = false;
     head.nextPrepared = true;
+}
+
+float ReverseEngine::readCaptured(int channel, int end, int captureAge, float elapsed, float offset,
+                                  bool mayOverwrite, float& lastRead, bool& exhausted) const noexcept
+{
+    // The writer advances while the captured head moves backwards. Once their combined travel
+    // spans the ring, the requested history has already been replaced. Hold the final valid
+    // sample rather than wrapping through the writer into material from the current segment.
+    if (mayOverwrite && static_cast<float>(captureAge) + elapsed + offset
+                            >= static_cast<float>(capacity - 8))
+        exhausted = true;
+
+    if (!exhausted)
+        lastRead = readInterpolated(channel, static_cast<float>(end) - offset);
+    return lastRead;
 }
 
 float ReverseEngine::processSample(int channel, float input, const EngineSettings& settings) noexcept
@@ -122,6 +143,9 @@ float ReverseEngine::processSample(int channel, float input, const EngineSetting
             head.activeLength = head.nextLength;
             head.phase = head.transitionPhase;
             head.readOffset = head.nextOffset;
+            head.captureAge = head.nextCaptureAge;
+            head.lastRead = head.nextLastRead;
+            head.readExhausted = head.nextReadExhausted;
             head.nextPrepared = false;
         }
         else
@@ -132,10 +156,8 @@ float ReverseEngine::processSample(int channel, float input, const EngineSetting
     // from phase * speed, so speed automation changes the read velocity, not the read position.
     // At speeds above 1x a segment reads speed * length samples of history; hold at the oldest
     // valid sample instead of wrapping around into material written after the segment started.
-    const auto maximumReadOffset = static_cast<float>(capacity - 8);
-    head.readOffset = juce::jmin(head.readOffset, maximumReadOffset);
-    head.nextOffset = juce::jmin(head.nextOffset, maximumReadOffset);
-    auto wet = readInterpolated(channel, static_cast<float>(head.segmentEnd) - head.readOffset);
+    auto wet = readCaptured(channel, head.segmentEnd, head.captureAge, head.phase, head.readOffset,
+                            !settings.freeze, head.lastRead, head.readExhausted);
 
     const auto fadeSamples = juce::jlimit(1.0f, head.activeLength * 0.25f,
                                          head.activeLength * settings.crossfade);
@@ -149,7 +171,9 @@ float ReverseEngine::processSample(int channel, float input, const EngineSetting
             head.transitionPhase = 0.0f;
         }
         const auto transition = juce::jlimit(0.0f, 1.0f, head.transitionPhase / fadeSamples);
-        const auto nextWet = readInterpolated(channel, static_cast<float>(head.nextEnd) - head.nextOffset);
+        const auto nextWet = readCaptured(channel, head.nextEnd, head.nextCaptureAge,
+                                          head.transitionPhase, head.nextOffset, !settings.freeze,
+                                          head.nextLastRead, head.nextReadExhausted);
         wet = wet * std::cos(transition * juce::MathConstants<float>::halfPi)
               + nextWet * std::sin(transition * juce::MathConstants<float>::halfPi);
         head.nextOffset += settings.speed;

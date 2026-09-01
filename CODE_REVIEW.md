@@ -39,6 +39,8 @@
 34. **Stringly-typed editor styling** — the LookAndFeel chose ring width and accent colour by matching control names and button captions. Styling now keys off component properties (`rl.sizeControl`, `rl.violet`); Size and Free-Time controls also gained the double-click-to-default behaviour the other knobs already had.
 35. **Parameter identifiers without version hints** — all parameters now use `juce::ParameterID { id, 1 }`. VST3 identifiers are derived from the string alone and are unchanged; an AU build would now get stable identifiers too.
 36. **Build portability and CI** — the universal/deployment-target cache overrides are Apple-only, so the DSP/processor suite configures and runs on Linux; `.github/workflows/ci.yml` builds the universal VST3 and runs the tests on macOS and additionally runs the suite on Linux. `package-release.sh` reads the version from `CMakeLists.txt`.
+37. **Long high-speed writer collision** — the high-speed history guard now includes capture age and elapsed segment time. Once the live writer has replaced the requested history, playback holds the last valid value instead of wrapping into current-segment material; a maximum-length 4× regression covers the collision point.
+38. **Installable CI artifact** — CI wraps the VST3 bundle with `ditto` before artifact upload so the Mach-O executable bit and bundle metadata survive download.
 
 ## Verification
 

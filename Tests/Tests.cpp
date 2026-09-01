@@ -194,6 +194,33 @@ public:
             expectLessThan(detector.maxDelta, ClickDetector::threshold(amplitude, w, 2.0f),
                            "Speed ramp late in a segment must not scrub the read head");
         }
+
+        beginTest("Maximum-length 4x playback never wraps through the live writer");
+        {
+            rl::ReverseEngine longEngine;
+            constexpr int capacity = 4096;
+            constexpr int length = capacity - 8;
+            longEngine.prepare(48000.0, length);
+            rl::EngineSettings s;
+            s.leftLength = s.rightLength = length;
+            s.speed = 4.0f;
+            s.crossfade = 0.04f;
+            float heldMinimum = 10.0f, heldMaximum = -10.0f;
+            for (int n = 0; n < length + 1800; ++n)
+            {
+                const auto input = 0.5f * std::sin(0.071f * static_cast<float>(n));
+                const auto output = longEngine.processSample(0, input, s);
+                (void) longEngine.processSample(1, input, s);
+                longEngine.advance();
+                if (n >= length + 1300)
+                {
+                    heldMinimum = juce::jmin(heldMinimum, output);
+                    heldMaximum = juce::jmax(heldMaximum, output);
+                }
+            }
+            expectLessThan(heldMaximum - heldMinimum, 0.001f,
+                           "Exhausted history must hold instead of reading newly written samples");
+        }
     }
 };
 

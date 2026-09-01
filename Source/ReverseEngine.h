@@ -45,16 +45,24 @@ private:
         float readOffset = 0.0f;       // samples read back from segmentEnd (accumulated, speed-integrated)
         float nextOffset = 0.0f;       // same for the incoming segment during the crossfade
         float transitionPhase = 0.0f;  // samples elapsed since the crossfade started
+        float lastRead = 0.0f;
+        float nextLastRead = 0.0f;
         int segmentEnd = 0;
+        int captureAge = 0;
         int activeLength = 1;
         int nextEnd = 0;
+        int nextCaptureAge = 0;
         int nextLength = 1;
         bool nextPrepared = false;
+        bool readExhausted = false;
+        bool nextReadExhausted = false;
         bool lastRetrigger = false;
         float antiAliasState = 0.0f;
     };
 
     float readInterpolated(int channel, float position) const noexcept;
+    float readCaptured(int channel, int end, int captureAge, float elapsed, float offset,
+                       bool mayOverwrite, float& lastRead, bool& exhausted) const noexcept;
     void beginSegment(int channel, int requestedLength, const EngineSettings&) noexcept;
     void prepareNextSegment(int channel, int requestedLength, const EngineSettings&) noexcept;
     float nextRandom() noexcept;

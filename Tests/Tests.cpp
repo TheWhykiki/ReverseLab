@@ -164,6 +164,11 @@ public:
 
     void runTest() override
     {
+        beginTest("Tail query is valid before prepareToPlay");
+        ReverseLabAudioProcessor unprepared;
+        expect(std::isfinite(unprepared.getTailLengthSeconds()));
+        expect(unprepared.getTailLengthSeconds() > 0.0);
+
         beginTest("Free timing is continuous and determines reported latency");
         ReverseLabAudioProcessor processor;
         setParameter(processor, rl::params::sync, 0.0f);

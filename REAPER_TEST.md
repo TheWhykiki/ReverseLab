@@ -22,7 +22,7 @@
 ## Stress test
 
 - 32 parallel tracks, each containing a tone generator and one ReverseLab VST3 instance.
-- All 32 instances were created and exposed 24 parameters each.
+- All 32 instances were created successfully. The current build exposes 26 parameters after adding independent continuous L/R free-time controls.
 - Timing mode, free time, speed, crossfade, feedback, random amount, and stereo offset were varied across instances.
 - The saved project contains 32 ReverseLab VST3 state blocks.
 - The two-second, 44.1 kHz, stereo 24-bit offline render completed with no clipped samples.

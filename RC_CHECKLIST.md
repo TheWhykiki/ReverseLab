@@ -8,7 +8,7 @@
 - Automated DSP and processor integration suite passes.
 - Unlinked L/R regression passes with identical input and strongly different left/right segment lengths.
 - Cubase 15 `vstscanner` returns success and reports `ReverseLab 1.0.0`, VST3 SDK 3.8, category `Fx|Delay`.
-- REAPER 7.79 native-arm64 instantiates the effect and exposes all 24 parameters.
+- REAPER 7.79 native-arm64 instantiates the effect; the current build exposes 26 parameters.
 - REAPER saves the plug-in state in a project and completes a 4.000-second, 44.1 kHz, stereo 24-bit offline render.
 - `afclip` reports no clipped samples in the RC1 host render.
 - REAPER stress test passes with 32 parallel instances and automated parameter variation; all 32 states are present in the saved project and the render contains no clipped samples.

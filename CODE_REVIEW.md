@@ -22,6 +22,10 @@
 18. **Automation smoothing** — speed, crossfade, feedback, filter cutoffs, stereo offset, and random amount now use sample-level smoothing in addition to mix, output, and bypass.
 19. **Host time-signature handling** — `1 Bar` and `2 Bars` previously assumed 4/4. They now derive their quarter-note length from the host numerator and denominator, with regression coverage for 3/4 and 5/4 transitions.
 20. **Linked-channel affordance** — with Link L/R enabled, the DSP correctly used the left timing value for both channels, but the right timing control still looked editable. The right sync/free control is now disabled and dimmed, and its caption explicitly reads `RIGHT SIZE · LINKED`; unlinking restores independent operation.
+21. **Stable random latency** — Random now varies capture position without changing segment duration, so host latency no longer oscillates at every randomized segment boundary.
+22. **Host/DSP latency handshake** — the message thread applies and acknowledges host latency before the audio thread switches its internal taps; old and new taps use a 10 ms equal-power transition.
+23. **State-restore race** — state loading now requests an atomic DSP reset that is consumed inside `processBlock()` instead of mutating engine and delay state from the caller thread.
+24. **Tail reporting** — tail duration now follows segment time and feedback decay, is bounded for Freeze, and remains valid when queried before `prepareToPlay()`.
 
 ## Verification
 
@@ -34,13 +38,13 @@
 - REAPER reloads the freshly installed VST3 and identifies it as `ReverseLab (Whykiki Audio)`; the dedicated unlinked-stereo regression remains green after the linked-control UI fix.
 - The installed user-level VST3 passes strict code-signature verification and both binary slices declare macOS 11.0 as their minimum OS.
 - Cubase 15 `vstscanner` exits with code 0 and identifies ReverseLab 1.0.0 as a native VST3 `Fx|Delay`.
-- REAPER 7.79 (native arm64) discovers and instantiates ReverseLab as VST3, exposes all 24 parameters, saves/restores the plug-in in an `.rpp`, and completes a four-second offline render at 44.1 kHz/24-bit stereo without clipped samples.
+- REAPER 7.79 (native arm64) discovers and instantiates ReverseLab as VST3, exposes 26 parameters in the current build, saves/restores the plug-in in an `.rpp`, and completes a four-second offline render at 44.1 kHz/24-bit stereo without clipped samples.
 - A separate REAPER stress project creates 32 parallel ReverseLab instances, varies timing, speed, crossfade, feedback, randomisation, and stereo offset, saves all 32 VST3 states, and completes a two-second offline render without clipped samples.
 
 ## Remaining limits
 
 - The anti-alias stage is a pragmatic real-time one-pole reconstruction filter, not a long-window polyphase resampler. It is appropriate for version 1 but extreme 4× material can still contain more aliasing than an offline-quality resampler.
-- Latency notification is asynchronous by design; a host may observe it one message-loop tick after the DSP length request.
+- Latency notification is asynchronous by design. The DSP keeps using the acknowledged latency until the message thread has updated the host, then crossfades its internal delay taps.
 - Freeze audio is intentionally not serialized, matching the product contract.
 - A silent preview cannot validate the visual density of real program material; this is covered only when audio flows in Cubase.
 - Cubase still needs a short listening/automation/offline-render acceptance pass inside a real user project; its scanner and REAPER's independent native instantiation/offline-render path are green.

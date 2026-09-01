@@ -84,6 +84,7 @@ void ReverseLabAudioProcessor::prepareToPlay(double sampleRate, int)
 int ReverseLabAudioProcessor::calculateLengthSamples(int choice, float freeMs, double bpm,
                                                      double beatsPerBar, bool sync) const noexcept
 {
+    const auto safeMaximum = juce::jmax(16, maximumDelay - 8);
     choice = juce::jlimit(0, static_cast<int>(rl::params::subdivisionBeats.size()) - 1, choice);
     if (sync)
     {
@@ -91,11 +92,11 @@ int ReverseLabAudioProcessor::calculateLengthSamples(int choice, float freeMs, d
         const auto beatLength = choice >= 13
             ? juce::jlimit(1.0, 32.0, beatsPerBar) * static_cast<double>(choice == 14 ? 2 : 1)
             : rl::params::subdivisionBeats[(size_t) choice];
-        return juce::jlimit(16, maximumDelay - 8,
+        return juce::jlimit(16, safeMaximum,
                             static_cast<int>(std::round(beatLength * 60.0 / safeBpm * currentSampleRate)));
     }
     const auto ms = juce::jlimit(20.0f, 4000.0f, freeMs);
-    return juce::jlimit(16, maximumDelay - 8, static_cast<int>(std::round(ms * currentSampleRate / 1000.0f)));
+    return juce::jlimit(16, safeMaximum, static_cast<int>(std::round(ms * currentSampleRate / 1000.0f)));
 }
 
 double ReverseLabAudioProcessor::getTailLengthSeconds() const

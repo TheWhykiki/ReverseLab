@@ -23,9 +23,13 @@ public:
     bool producesMidi() const override { return false; }
     bool isMidiEffect() const override { return false; }
     double getTailLengthSeconds() const override;
+    juce::AudioProcessorParameter* getBypassParameter() const override
+    {
+        return parameters.getParameter(rl::params::bypass);
+    }
 
     int getNumPrograms() override { return 6; }
-    int getCurrentProgram() override { return currentProgram; }
+    int getCurrentProgram() override { return currentProgram.load(std::memory_order_acquire); }
     void setCurrentProgram(int) override;
     const juce::String getProgramName(int) override;
     void changeProgramName(int, const juce::String&) override {}
@@ -52,6 +56,7 @@ private:
     void timerCallback() override;
     void invalidateDelayLines() noexcept;
     void setPlainParameter(const char* id, float plainValue);
+    void applyPendingProgramChange();
 
     rl::ReverseEngine engine;
     juce::AudioBuffer<float> dryDelay;
@@ -64,8 +69,12 @@ private:
     std::atomic<int> pendingLatency { 0 };
     std::atomic<int> acknowledgedLatency { 0 };
     std::atomic<double> publishedBpm { 120.0 };
+    std::atomic<double> publishedBeatsPerBar { 4.0 };
     std::atomic<bool> retriggerResetRequested { false };
     std::atomic<bool> processingResetRequested { false };
+    std::atomic<bool> programChangeRequested { false };
+    std::atomic<int> currentProgram { 0 };
+    std::atomic<int> pendingProgram { 0 };
     juce::SmoothedValue<float> smoothedMix, smoothedOutput, smoothedBypass, smoothedSpeed,
                                smoothedCrossfade, smoothedFeedback, smoothedHighpass,
                                smoothedLowpass, smoothedOffset, smoothedRandom;
@@ -76,7 +85,6 @@ private:
     int latencyTransitionRemaining = 0;
     int latencyTransitionLength = 1;
     int retriggerCountdown = -1;
-    int currentProgram = 0;
     double currentSampleRate = 44100.0;
     double smoothedBpm = 120.0;
     bool wasPlaying = false;

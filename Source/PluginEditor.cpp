@@ -364,6 +364,9 @@ void ReverseLabAudioProcessorEditor::resized()
 
 void ReverseLabAudioProcessorEditor::timerCallback()
 {
+    const auto programId = pluginProcessor.getCurrentProgram() + 1;
+    if (presetBox.getSelectedId() != programId)
+        presetBox.setSelectedId(programId, juce::dontSendNotification);
     const auto wantsSyncValues = pluginProcessor.parameters.getRawParameterValue(rl::params::sync)->load() > 0.5f;
     if (wantsSyncValues != showingSyncValues)
     {

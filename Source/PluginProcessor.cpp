@@ -105,10 +105,12 @@ double ReverseLabAudioProcessor::getTailLengthSeconds() const
     const auto linked = parameters.getRawParameterValue(rl::params::link)->load() > 0.5f;
     const auto left = calculateLengthSamples(
         static_cast<int>(parameters.getRawParameterValue(rl::params::leftSize)->load()),
-        parameters.getRawParameterValue(rl::params::leftFreeMs)->load(), publishedBpm.load(), 4.0, sync);
+        parameters.getRawParameterValue(rl::params::leftFreeMs)->load(), publishedBpm.load(),
+        publishedBeatsPerBar.load(), sync);
     const auto right = linked ? left : calculateLengthSamples(
         static_cast<int>(parameters.getRawParameterValue(rl::params::rightSize)->load()),
-        parameters.getRawParameterValue(rl::params::rightFreeMs)->load(), publishedBpm.load(), 4.0, sync);
+        parameters.getRawParameterValue(rl::params::rightFreeMs)->load(), publishedBpm.load(),
+        publishedBeatsPerBar.load(), sync);
     const auto segmentSeconds = static_cast<double>(juce::jmax(left, right))
                                 / juce::jmax(1.0, currentSampleRate);
     if (parameters.getRawParameterValue(rl::params::freeze)->load() > 0.5f)
@@ -130,6 +132,8 @@ void ReverseLabAudioProcessor::queueLatencyUpdate(int samples) noexcept
 
 void ReverseLabAudioProcessor::timerCallback()
 {
+    if (programChangeRequested.exchange(false, std::memory_order_acq_rel))
+        applyPendingProgramChange();
     const auto latency = pendingLatency.load();
     if (latency != getLatencySamples())
     {
@@ -221,6 +225,7 @@ void ReverseLabAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, ju
     if (std::isfinite(hostBpm) && hostBpm >= 20.0 && hostBpm <= 400.0)
         smoothedBpm += 0.15 * (hostBpm - smoothedBpm);
     publishedBpm.store(smoothedBpm, std::memory_order_relaxed);
+    publishedBeatsPerBar.store(beatsPerBar, std::memory_order_relaxed);
     const auto transportJump = playing && blockPosition && previousBlockPosition
         && std::abs(*blockPosition - (*previousBlockPosition + buffer.getNumSamples()))
                > juce::jmax<int64_t>(64, buffer.getNumSamples() * 2);
@@ -386,7 +391,20 @@ void ReverseLabAudioProcessor::setPlainParameter(const char* id, float plainValu
 
 void ReverseLabAudioProcessor::setCurrentProgram(int index)
 {
-    currentProgram = juce::jlimit(0, getNumPrograms() - 1, index);
+    pendingProgram.store(juce::jlimit(0, getNumPrograms() - 1, index), std::memory_order_release);
+    programChangeRequested.store(true, std::memory_order_release);
+    if (juce::MessageManager::getInstanceWithoutCreating() != nullptr
+        && juce::MessageManager::getInstanceWithoutCreating()->isThisTheMessageThread())
+    {
+        programChangeRequested.store(false, std::memory_order_release);
+        applyPendingProgramChange();
+    }
+}
+
+void ReverseLabAudioProcessor::applyPendingProgramChange()
+{
+    const auto program = pendingProgram.load(std::memory_order_acquire);
+    currentProgram.store(program, std::memory_order_release);
     setPlainParameter(rl::params::sync, 1.0f); setPlainParameter(rl::params::link, 1.0f);
     setPlainParameter(rl::params::leftSize, 8.0f); setPlainParameter(rl::params::rightSize, 8.0f);
     setPlainParameter(rl::params::leftFreeMs, 500.0f); setPlainParameter(rl::params::rightFreeMs, 500.0f);
@@ -397,7 +415,7 @@ void ReverseLabAudioProcessor::setCurrentProgram(int index)
     setPlainParameter(rl::params::lowpass, 20000.0f); setPlainParameter(rl::params::output, 0.0f);
     setPlainParameter(rl::params::retrigger, 0.0f); setPlainParameter(rl::params::bypass, 0.0f);
     setPlainParameter(rl::params::seed, 4242.0f);
-    switch (currentProgram)
+    switch (program)
     {
         case 1: setPlainParameter(rl::params::link, 0.0f); setPlainParameter(rl::params::rightSize, 9.0f);
                 setPlainParameter(rl::params::stereoOffset, 35.0f); setPlainParameter(rl::params::random, 18.0f); break;
@@ -416,7 +434,7 @@ void ReverseLabAudioProcessor::setCurrentProgram(int index)
 void ReverseLabAudioProcessor::getStateInformation(juce::MemoryBlock& destination)
 {
     auto state = parameters.copyState();
-    state.setProperty("program", currentProgram, nullptr);
+    state.setProperty("program", currentProgram.load(std::memory_order_acquire), nullptr);
     state.setProperty("editorWidth", editorWidth, nullptr);
     state.setProperty("editorHeight", editorHeight, nullptr);
     if (auto xml = state.createXml()) copyXmlToBinary(*xml, destination);
@@ -429,7 +447,11 @@ void ReverseLabAudioProcessor::setStateInformation(const void* data, int size)
         auto state = juce::ValueTree::fromXml(*xml);
         if (state.isValid())
         {
-            currentProgram = juce::jlimit(0, getNumPrograms() - 1, static_cast<int>(state.getProperty("program", 0)));
+            const auto restoredProgram = juce::jlimit(0, getNumPrograms() - 1,
+                                                      static_cast<int>(state.getProperty("program", 0)));
+            currentProgram.store(restoredProgram, std::memory_order_release);
+            pendingProgram.store(restoredProgram, std::memory_order_release);
+            programChangeRequested.store(false, std::memory_order_release);
             editorWidth = juce::jlimit(720, 1440, static_cast<int>(state.getProperty("editorWidth", 900)));
             editorHeight = juce::jlimit(460, 920, static_cast<int>(state.getProperty("editorHeight", 610)));
             parameters.replaceState(state);

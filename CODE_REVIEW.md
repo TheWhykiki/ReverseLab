@@ -26,6 +26,9 @@
 22. **Host/DSP latency handshake** — the message thread applies and acknowledges host latency before the audio thread switches its internal taps; old and new taps use a 10 ms equal-power transition.
 23. **State-restore race** — state loading now requests an atomic DSP reset that is consumed inside `processBlock()` instead of mutating engine and delay state from the caller thread.
 24. **Tail reporting** — tail duration now follows segment time and feedback decay, is bounded for Freeze, and remains valid when queried before `prepareToPlay()`.
+25. **VST3 host bypass** — `getBypassParameter()` now returns ReverseLab's saved bypass parameter. This keeps VST3 hosts in `processBlock()` and uses the latency-aligned dry path instead of JUCE's default zero-latency `processBlockBypassed()` fallback.
+26. **Real-time program changes** — `setCurrentProgram()` now publishes only an atomic request when called outside the message thread. The processor timer applies the parameter batch and host notifications safely, and the editor follows host-originated preset changes without feedback.
+27. **Meter-aware tail reporting** — the published tail now uses the latest host time signature instead of assuming 4/4, matching the DSP's Bar/2-Bar segment length in asymmetric meters.
 
 ## Verification
 

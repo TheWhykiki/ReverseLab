@@ -178,6 +178,18 @@ public:
         processor.prepareToPlay(48000.0, 256);
         expectEquals(processor.getLatencySamples(), 6600);
         expectEquals(processor.getCurrentLatencySamples(), 6600);
+        expect(processor.getBypassParameter() == processor.parameters.getParameter(rl::params::bypass),
+               "The VST3 host bypass must use ReverseLab's latency-aligned bypass parameter");
+
+        beginTest("Factory programs are applied by the message-thread service");
+        ReverseLabAudioProcessor presetProcessor;
+        presetProcessor.setCurrentProgram(3);
+        presetProcessor.servicePendingHostUpdatesForTesting();
+        expectEquals(presetProcessor.getCurrentProgram(), 3);
+        expectWithinAbsoluteError(presetProcessor.parameters.getRawParameterValue(rl::params::feedback)->load(),
+                                  72.0f, 0.001f);
+        expectWithinAbsoluteError(presetProcessor.parameters.getRawParameterValue(rl::params::bypass)->load(),
+                                  0.0f, 0.001f);
 
         beginTest("Internal bypass returns the latency-aligned dry signal");
         setParameter(processor, rl::params::bypass, 1.0f);
@@ -261,6 +273,7 @@ public:
             playHead.position.setTimeInSamples(64LL * (i + 2));
         }
         expectEquals(meterAware.getCurrentLatencySamples(), 120000);
+        expectWithinAbsoluteError(meterAware.getTailLengthSeconds(), 2.5, 0.01);
         meterAware.setPlayHead(nullptr);
 
         beginTest("Unlinked left and right times produce distinct stereo output");

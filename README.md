@@ -1,4 +1,4 @@
-# ReverseLab
+# ReverseLab 1.0 RC1
 
 ReverseLab is a clean-room, tempo-synchronised stereo reverse effect for Cubase on macOS. It is an independent private project and does not contain Retrograde code, artwork, identifiers, or presets.
 
@@ -39,6 +39,8 @@ ReverseLab intentionally uses its own bundle and VST3 identifiers. It cannot rep
 
 - JUCE 8.0.15, VST3 SDK 3.8
 - Universal `arm64` and `x86_64`
+- Minimum deployment target macOS 11.0 in both binary slices
 - Ad-hoc signed for private local use
 - Cubase 15 `vstscanner` exit code 0
-- Automated DSP tests pass for reversal, feedback stability, freeze, and deterministic randomisation
+- REAPER 7.79 native-arm64 host test: VST3 instantiated, 24 parameters exposed, project state saved, 4 s offline render completed at 44.1 kHz/24-bit stereo with no clipped samples
+- Automated DSP and processor tests pass at 44.1/48/88.2/96/192 kHz, variable block sizes, continuous free timing, latency-aligned bypass, state restoration, reset invalidation, 0.25×/1×/4× speed, feedback stability, freeze, and deterministic randomisation

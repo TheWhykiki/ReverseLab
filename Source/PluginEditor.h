@@ -8,6 +8,8 @@ class ReverseLabLookAndFeel final : public juce::LookAndFeel_V4
 public:
     ReverseLabLookAndFeel();
     void drawRotarySlider(juce::Graphics&, int, int, int, int, float, float, float, juce::Slider&) override;
+    void drawToggleButton(juce::Graphics&, juce::ToggleButton&, bool, bool) override;
+    void drawComboBox(juce::Graphics&, int, int, bool, int, int, int, int, juce::ComboBox&) override;
 };
 
 class ScopeComponent final : public juce::Component, private juce::Timer
@@ -31,7 +33,6 @@ public:
 private:
     using SliderAttachment = juce::AudioProcessorValueTreeState::SliderAttachment;
     using ButtonAttachment = juce::AudioProcessorValueTreeState::ButtonAttachment;
-    using ComboAttachment = juce::AudioProcessorValueTreeState::ComboBoxAttachment;
 
     struct Knob
     {
@@ -43,16 +44,22 @@ private:
     void configureKnob(Knob&, const juce::String&, const char* parameterId);
     void configureButton(juce::ToggleButton&, const juce::String&, const char* parameterId,
                          std::unique_ptr<ButtonAttachment>&);
+    void configureSizeControl(juce::Slider&, juce::Label&, const juce::String&, const char* parameterId,
+                              std::unique_ptr<SliderAttachment>&);
+    void configureFreeControl(juce::Slider&, const juce::String&, const char* parameterId,
+                              std::unique_ptr<SliderAttachment>&);
     void timerCallback() override;
 
-    ReverseLabAudioProcessor& processor;
+    ReverseLabAudioProcessor& pluginProcessor;
     ReverseLabLookAndFeel lookAndFeel;
     ScopeComponent scope;
     juce::Label title, subtitle, latencyLabel, leftSizeLabel, rightSizeLabel, presetLabel;
-    juce::ComboBox leftSize, rightSize, presetBox;
+    juce::Slider leftSize, rightSize, leftFreeTime, rightFreeTime;
+    juce::ComboBox presetBox;
     juce::ToggleButton sync, link, freeze, retrigger, bypass;
-    std::array<Knob, 9> knobs;
-    std::unique_ptr<ComboAttachment> leftSizeAttachment, rightSizeAttachment;
+    std::array<Knob, 10> knobs;
+    std::unique_ptr<SliderAttachment> leftSizeAttachment, rightSizeAttachment;
+    std::unique_ptr<SliderAttachment> leftFreeAttachment, rightFreeAttachment;
     std::unique_ptr<ButtonAttachment> syncAttachment, linkAttachment, freezeAttachment,
                                       retriggerAttachment, bypassAttachment;
     bool showingSyncValues = true;

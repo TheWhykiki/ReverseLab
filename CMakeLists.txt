@@ -3,7 +3,7 @@ project(ReverseLab VERSION 1.0.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "Minimum macOS version")
+set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "Minimum macOS version" FORCE)
 set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64" CACHE STRING "Universal macOS build" FORCE)
 
 add_subdirectory(external/JUCE)
@@ -30,7 +30,8 @@ target_sources(ReverseLab PRIVATE
 target_compile_definitions(ReverseLab PUBLIC
     JUCE_WEB_BROWSER=0
     JUCE_USE_CURL=0
-    JUCE_VST3_CAN_REPLACE_VST2=0)
+    JUCE_VST3_CAN_REPLACE_VST2=0
+    REVERSELAB_RELEASE_CHANNEL="RC1")
 
 target_link_libraries(ReverseLab PRIVATE
     juce::juce_audio_utils
@@ -41,16 +42,25 @@ target_link_libraries(ReverseLab PRIVATE
 
 juce_add_console_app(ReverseLabTests PRODUCT_NAME "ReverseLab Tests")
 target_sources(ReverseLabTests PRIVATE
-    Tests/Tests.cpp
-    Source/ReverseEngine.cpp
-    Source/ReverseEngine.h)
+    Tests/Tests.cpp)
 target_include_directories(ReverseLabTests PRIVATE Source)
+target_compile_definitions(ReverseLabTests PRIVATE REVERSELAB_UNIT_TESTS=1)
 target_link_libraries(ReverseLabTests PRIVATE
-    juce::juce_audio_basics
+    ReverseLab
+    juce::juce_audio_utils
     juce::juce_dsp
-    juce::juce_events
     PUBLIC juce::juce_recommended_config_flags
            juce::juce_recommended_warning_flags)
 
 enable_testing()
 add_test(NAME ReverseLabDSP COMMAND ReverseLabTests)
+
+juce_add_console_app(ReverseLabRenderAB PRODUCT_NAME "ReverseLab A-B Renderer")
+target_sources(ReverseLabRenderAB PRIVATE Tests/RenderAB.cpp)
+target_include_directories(ReverseLabRenderAB PRIVATE Source)
+target_link_libraries(ReverseLabRenderAB PRIVATE
+    ReverseLab
+    juce::juce_audio_utils
+    juce::juce_dsp
+    PUBLIC juce::juce_recommended_config_flags
+           juce::juce_recommended_warning_flags)

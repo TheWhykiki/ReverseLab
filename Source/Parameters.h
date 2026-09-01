@@ -8,6 +8,8 @@ inline constexpr auto sync = "sync";
 inline constexpr auto link = "link";
 inline constexpr auto leftSize = "leftSize";
 inline constexpr auto rightSize = "rightSize";
+inline constexpr auto leftFreeMs = "leftFreeMs";
+inline constexpr auto rightFreeMs = "rightFreeMs";
 inline constexpr auto speed = "speed";
 inline constexpr auto crossfade = "crossfade";
 inline constexpr auto mix = "mix";
@@ -44,6 +46,8 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
     layout.add(std::make_unique<APB>(link, "Link Left/Right", true));
     layout.add(std::make_unique<APC>(leftSize, "Left Size", subdivisionNames(), 8));
     layout.add(std::make_unique<APC>(rightSize, "Right Size", subdivisionNames(), 8));
+    layout.add(std::make_unique<APF>(leftFreeMs, "Left Free Time", juce::NormalisableRange<float>(20.0f, 4000.0f, 0.1f, 0.35f), 500.0f, "ms"));
+    layout.add(std::make_unique<APF>(rightFreeMs, "Right Free Time", juce::NormalisableRange<float>(20.0f, 4000.0f, 0.1f, 0.35f), 500.0f, "ms"));
     layout.add(std::make_unique<APF>(speed, "Reverse Speed", juce::NormalisableRange<float>(0.25f, 4.0f, 0.001f, 0.45f), 1.0f, "x"));
     layout.add(std::make_unique<APF>(crossfade, "Crossfade", juce::NormalisableRange<float>(0.0f, 25.0f, 0.01f), 4.0f, "%"));
     layout.add(std::make_unique<APF>(mix, "Dry/Wet", juce::NormalisableRange<float>(0.0f, 100.0f, 0.01f), 100.0f, "%"));

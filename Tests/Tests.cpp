@@ -413,6 +413,79 @@ public:
                            "Smoothed speed automation must stay click-free end to end");
         }
 
+        beginTest("Shortening the segment length is click-free across the wet alignment tap");
+        {
+            // A shorter segment makes the engine's active length drop at a segment boundary while
+            // the host still reports the old, longer latency. The wet alignment offset therefore
+            // jumps from 0 to (old - new) = 5280 samples; that change must be crossfaded, not
+            // switched. Several non-commensurate test tones make sure a hard tap switch cannot
+            // hide behind a whole-period offset or a lucky phase at the switch instant.
+            for (const auto frequency : { 440.0f, 631.0f, 977.0f })
+            {
+                ReverseLabAudioProcessor shortening;
+                setParameter(shortening, rl::params::sync, 0.0f);
+                setParameter(shortening, rl::params::link, 1.0f);
+                setParameter(shortening, rl::params::leftFreeMs, 300.0f);
+                setParameter(shortening, rl::params::mix, 100.0f);
+                setParameter(shortening, rl::params::feedback, 0.0f);
+                setParameter(shortening, rl::params::random, 0.0f);
+                setParameter(shortening, rl::params::stereoOffset, 0.0f);
+                shortening.prepareToPlay(48000.0, 256);
+                constexpr float amplitude = 0.5f;
+                const float w = juce::MathConstants<float>::twoPi * frequency / 48000.0f;
+                ClickDetector detector;
+                juce::AudioBuffer<float> lengthBlock(2, 256);
+                int absolute = 0;
+                for (int blockIndex = 0; blockIndex < 400; ++blockIndex)
+                {
+                    if (blockIndex == 120) setParameter(shortening, rl::params::leftFreeMs, 190.0f);
+                    for (int i = 0; i < 256; ++i)
+                    {
+                        const auto value = amplitude * std::sin(w * static_cast<float>(absolute + i));
+                        lengthBlock.setSample(0, i, value);
+                        lengthBlock.setSample(1, i, value);
+                    }
+                    shortening.processBlock(lengthBlock, midi);
+                    if ((blockIndex & 15) == 0) shortening.servicePendingHostUpdatesForTesting();
+                    for (int i = 0; i < 256; ++i)
+                    {
+                        if (blockIndex >= 120) detector.push(lengthBlock.getSample(0, i));
+                        else detector.previous = lengthBlock.getSample(0, i);
+                    }
+                    absolute += 256;
+                }
+                expectEquals(shortening.getCurrentLatencySamples(), 9120);
+                logMessage("  " + juce::String(frequency, 0) + " Hz: max step " + juce::String(detector.maxDelta, 4)
+                           + " (limit " + juce::String(ClickDetector::threshold(amplitude, w, 1.0f), 4) + ")");
+                expectLessThan(detector.maxDelta, ClickDetector::threshold(amplitude, w, 1.0f),
+                               "Segment shortening must crossfade the wet alignment tap");
+            }
+        }
+
+        beginTest("processBlock before prepareToPlay passes audio through unharmed");
+        {
+            ReverseLabAudioProcessor unprepared2;
+            juce::AudioBuffer<float> raw(2, 64);
+            for (int i = 0; i < 64; ++i) { raw.setSample(0, i, 0.25f); raw.setSample(1, i, -0.25f); }
+            unprepared2.processBlock(raw, midi);
+            expectWithinAbsoluteError(raw.getSample(0, 10), 0.25f, 0.0001f);
+            expectWithinAbsoluteError(raw.getSample(1, 10), -0.25f, 0.0001f);
+        }
+
+        beginTest("prepareToPlay reports latency from the host tempo when available");
+        {
+            ReverseLabAudioProcessor tempoAware;
+            setParameter(tempoAware, rl::params::sync, 1.0f);
+            setParameter(tempoAware, rl::params::link, 1.0f);
+            setParameter(tempoAware, rl::params::leftSize, 8.0f); // 1/4
+            TestPlayHead hostAt90;
+            hostAt90.position.setBpm(90.0);
+            tempoAware.setPlayHead(&hostAt90);
+            tempoAware.prepareToPlay(48000.0, 64);
+            expectEquals(tempoAware.getLatencySamples(), 32000); // 60 / 90 * 48000
+            tempoAware.setPlayHead(nullptr);
+        }
+
         beginTest("Reported tail follows feedback decay");
         ReverseLabAudioProcessor tail;
         setParameter(tail, rl::params::sync, 0.0f);

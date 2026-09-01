@@ -50,6 +50,10 @@ public:
 
 private:
     struct OnePoleState { float low = 0.0f; float highLow = 0.0f; };
+    // Per-channel wet alignment tap. The offset depends on the host-acknowledged latency *and* the
+    // engine's active segment length, so it can change at a segment boundary before the host has
+    // acknowledged a new latency. Every offset change is crossfaded instead of switched hard.
+    struct WetTap { int current = 0; int previous = 0; int transitionRemaining = 0; };
     int calculateLengthSamples(int choice, float freeMs, double bpm, double beatsPerBar, bool sync) const noexcept;
     float processFilters(int channel, float input, float hpHz, float lpHz) noexcept;
     void queueLatencyUpdate(int samples) noexcept;
@@ -63,6 +67,7 @@ private:
     juce::AudioBuffer<float> wetAlignmentDelay;
     std::array<std::vector<uint32_t>, 2> dryGenerations, wetGenerations;
     std::array<OnePoleState, 2> filterState;
+    std::array<WetTap, 2> wetTaps;
     std::array<std::atomic<float>, 256> scope {};
     std::atomic<int> scopeWrite { 0 };
     std::atomic<int> displayedLatency { 0 };

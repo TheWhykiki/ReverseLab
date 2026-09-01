@@ -38,7 +38,6 @@ void ReverseLabAudioProcessor::prepareToPlay(double sampleRate, int)
     delayGeneration = 1;
     dryWrite = wetWrite = 0;
     filterState = {};
-    smoothedBpm = 120.0;
     wasPlaying = false;
     previousBlockPosition.reset();
     appliedSeed = 0;
@@ -64,14 +63,33 @@ void ReverseLabAudioProcessor::prepareToPlay(double sampleRate, int)
     smoothedLowpass.setCurrentAndTargetValue(parameters.getRawParameterValue(rl::params::lowpass)->load());
     smoothedOffset.setCurrentAndTargetValue(parameters.getRawParameterValue(rl::params::stereoOffset)->load() * 0.01f);
     smoothedRandom.setCurrentAndTargetValue(parameters.getRawParameterValue(rl::params::random)->load() * 0.01f);
+    // Use the host tempo and meter when they are already known so the latency reported from
+    // prepareToPlay() matches the first processed segment instead of a 120 BPM 4/4 assumption.
+    double initialBpm = 120.0, initialBeatsPerBar = 4.0;
+    if (auto* playHead = getPlayHead())
+        if (auto position = playHead->getPosition())
+        {
+            if (auto bpm = position->getBpm())
+                if (std::isfinite(*bpm) && *bpm >= 20.0 && *bpm <= 400.0) initialBpm = *bpm;
+            if (auto signature = position->getTimeSignature())
+                if (signature->numerator > 0 && signature->denominator > 0)
+                    initialBeatsPerBar = static_cast<double>(signature->numerator) * 4.0
+                                         / static_cast<double>(signature->denominator);
+        }
+    smoothedBpm = initialBpm;
+    publishedBpm.store(initialBpm);
+    publishedBeatsPerBar.store(initialBeatsPerBar);
     const auto sync = parameters.getRawParameterValue(rl::params::sync)->load() > 0.5f;
     const auto linked = parameters.getRawParameterValue(rl::params::link)->load() > 0.5f;
     const auto left = calculateLengthSamples(static_cast<int>(parameters.getRawParameterValue(rl::params::leftSize)->load()),
-                                             parameters.getRawParameterValue(rl::params::leftFreeMs)->load(), 120.0, 4.0, sync);
+                                             parameters.getRawParameterValue(rl::params::leftFreeMs)->load(), initialBpm, initialBeatsPerBar, sync);
     const auto right = linked ? left : calculateLengthSamples(
         static_cast<int>(parameters.getRawParameterValue(rl::params::rightSize)->load()),
-        parameters.getRawParameterValue(rl::params::rightFreeMs)->load(), 120.0, 4.0, sync);
+        parameters.getRawParameterValue(rl::params::rightFreeMs)->load(), initialBpm, initialBeatsPerBar, sync);
     activeProcessingLatency = juce::jmax(left, right);
+    wetTaps = {};
+    wetTaps[0].current = juce::jmax(0, activeProcessingLatency - left);
+    wetTaps[1].current = juce::jmax(0, activeProcessingLatency - right);
     previousProcessingLatency = activeProcessingLatency;
     latencyTransitionRemaining = 0;
     latencyTransitionLength = juce::jmax(1, static_cast<int>(std::round(sampleRate * 0.01)));
@@ -188,6 +206,7 @@ void ReverseLabAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, ju
     juce::ScopedNoDenormals noDenormals;
     const auto channels = juce::jmin(2, buffer.getNumChannels());
     if (channels == 0) return;
+    if (dryDelay.getNumSamples() == 0) return; // processBlock() before prepareToPlay(): pass audio through
 
     if (processingResetRequested.exchange(false, std::memory_order_acq_rel))
     {
@@ -223,7 +242,12 @@ void ReverseLabAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, ju
         playing = position->getIsPlaying();
     }
     if (std::isfinite(hostBpm) && hostBpm >= 20.0 && hostBpm <= 400.0)
-        smoothedBpm += 0.15 * (hostBpm - smoothedBpm);
+    {
+        // ~65 ms tempo smoothing expressed in time, so the response does not depend on block size.
+        const auto tempoCoefficient = 1.0 - std::exp(-static_cast<double>(buffer.getNumSamples())
+                                                     / (currentSampleRate * 0.065));
+        smoothedBpm += tempoCoefficient * (hostBpm - smoothedBpm);
+    }
     publishedBpm.store(smoothedBpm, std::memory_order_relaxed);
     publishedBeatsPerBar.store(beatsPerBar, std::memory_order_relaxed);
     const auto transportJump = playing && blockPosition && previousBlockPosition
@@ -328,17 +352,29 @@ void ReverseLabAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, ju
             wet = processFilters(channel, wet, hp, lp);
             wetAlignmentDelay.setSample(channel, wetWrite, wet);
             wetGenerations[(size_t) channel][(size_t) wetWrite] = delayGeneration;
-            const auto readWetTap = [this, channel, delayCapacity](int totalLatency) noexcept
+            const auto readWetTap = [this, channel, delayCapacity](int offset) noexcept
             {
-                const auto offset = juce::jmax(0, totalLatency - engine.getActiveLength(channel));
                 const auto index = (wetWrite - offset + delayCapacity) % delayCapacity;
                 return wetGenerations[(size_t) channel][(size_t) index] == delayGeneration
                     ? wetAlignmentDelay.getSample(channel, index) : 0.0f;
             };
-            const auto wetNew = readWetTap(latency);
-            wet = latencyTransitionRemaining > 0
-                ? readWetTap(previousProcessingLatency) * oldTapGain + wetNew * newTapGain
-                : wetNew;
+            auto& tap = wetTaps[(size_t) channel];
+            const auto desiredOffset = juce::jmax(0, latency - engine.getActiveLength(channel));
+            if (desiredOffset != tap.current)
+            {
+                tap.previous = tap.current;
+                tap.current = desiredOffset;
+                tap.transitionRemaining = latencyTransitionLength;
+            }
+            wet = readWetTap(tap.current);
+            if (tap.transitionRemaining > 0)
+            {
+                const auto tapTransition = 1.0f - static_cast<float>(tap.transitionRemaining)
+                                                  / static_cast<float>(latencyTransitionLength);
+                wet = readWetTap(tap.previous) * std::cos(tapTransition * juce::MathConstants<float>::halfPi)
+                      + wet * std::sin(tapTransition * juce::MathConstants<float>::halfPi);
+                --tap.transitionRemaining;
+            }
             const auto processed = (dry * dryGain + wet * wetGain) * outputGain;
             auto output = processed + bypassAmount * (dry - processed);
             if (!std::isfinite(output)) output = 0.0f;

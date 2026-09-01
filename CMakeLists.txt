@@ -31,7 +31,7 @@ target_compile_definitions(ReverseLab PUBLIC
     JUCE_WEB_BROWSER=0
     JUCE_USE_CURL=0
     JUCE_VST3_CAN_REPLACE_VST2=0
-    REVERSELAB_RELEASE_CHANNEL="RC1")
+    REVERSELAB_RELEASE_CHANNEL="Stable")
 
 target_link_libraries(ReverseLab PRIVATE
     juce::juce_audio_utils

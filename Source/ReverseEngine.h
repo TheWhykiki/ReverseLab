@@ -47,22 +47,24 @@ private:
         float transitionPhase = 0.0f;  // samples elapsed since the crossfade started
         float lastRead = 0.0f;
         float nextLastRead = 0.0f;
+        float historyRemaining = 0.0f;
+        float nextHistoryRemaining = 0.0f;
         int segmentEnd = 0;
-        int captureAge = 0;
         int activeLength = 1;
         int nextEnd = 0;
-        int nextCaptureAge = 0;
         int nextLength = 1;
         bool nextPrepared = false;
         bool readExhausted = false;
         bool nextReadExhausted = false;
+        bool wasFrozen = false;
         bool lastRetrigger = false;
         float antiAliasState = 0.0f;
     };
 
     float readInterpolated(int channel, float position) const noexcept;
-    float readCaptured(int channel, int end, int captureAge, float elapsed, float offset,
-                       bool mayOverwrite, float& lastRead, bool& exhausted) const noexcept;
+    float readCaptured(int channel, int end, float offset, float speed, bool mayOverwrite,
+                       float& remaining, float& lastRead, bool& exhausted) const noexcept;
+    float distanceFromWriter(float readPosition) const noexcept;
     void beginSegment(int channel, int requestedLength, const EngineSettings&) noexcept;
     void prepareNextSegment(int channel, int requestedLength, const EngineSettings&) noexcept;
     float nextRandom() noexcept;

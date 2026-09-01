@@ -395,10 +395,8 @@ void ReverseLabAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, ju
         }
     }
     const auto nextLatency = juce::jmax(engine.getActiveLength(0), engine.getActiveLength(1));
-    if (nextLatency > 1 && nextLatency != activeProcessingLatency)
-    {
+    if (nextLatency > 1)
         queueLatencyUpdate(nextLatency);
-    }
 }
 
 float ReverseLabAudioProcessor::getScopeSample(int index) const noexcept

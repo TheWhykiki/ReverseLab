@@ -221,6 +221,43 @@ public:
             expectLessThan(heldMaximum - heldMinimum, 0.001f,
                            "Exhausted history must hold instead of reading newly written samples");
         }
+
+        beginTest("Unfreezing a long capture resumes reverse motion");
+        {
+            rl::ReverseEngine freezeEngine;
+            constexpr int length = 4088;
+            freezeEngine.prepare(48000.0, length);
+            rl::EngineSettings s;
+            s.leftLength = s.rightLength = length;
+            s.speed = 1.0f;
+            s.crossfade = 0.04f;
+            for (int n = 0; n < length * 2; ++n)
+            {
+                const auto input = 0.5f * std::sin(0.071f * static_cast<float>(n));
+                (void) freezeEngine.processSample(0, input, s);
+                (void) freezeEngine.processSample(1, input, s);
+                freezeEngine.advance();
+            }
+            s.freeze = true;
+            for (int n = 0; n < 3000; ++n)
+            {
+                (void) freezeEngine.processSample(0, 0.0f, s);
+                (void) freezeEngine.processSample(1, 0.0f, s);
+                freezeEngine.advance();
+            }
+            s.freeze = false;
+            float minimum = 10.0f, maximum = -10.0f;
+            for (int n = 0; n < 256; ++n)
+            {
+                const auto output = freezeEngine.processSample(0, 0.0f, s);
+                (void) freezeEngine.processSample(1, 0.0f, s);
+                freezeEngine.advance();
+                minimum = juce::jmin(minimum, output);
+                maximum = juce::jmax(maximum, output);
+            }
+            expect(maximum - minimum > 0.05f,
+                   "Unfreeze must resume motion instead of holding a DC value");
+        }
     }
 };
 
@@ -247,6 +284,29 @@ public:
         expectEquals(processor.getCurrentLatencySamples(), 6600);
         expect(processor.getBypassParameter() == processor.parameters.getParameter(rl::params::bypass),
                "The VST3 host bypass must use ReverseLab's latency-aligned bypass parameter");
+
+        beginTest("A reverted length cancels a pending latency increase");
+        {
+            ReverseLabAudioProcessor latencyRevert;
+            setParameter(latencyRevert, rl::params::sync, 0.0f);
+            setParameter(latencyRevert, rl::params::link, 1.0f);
+            setParameter(latencyRevert, rl::params::leftFreeMs, 100.0f);
+            latencyRevert.prepareToPlay(48000.0, 256);
+            juce::AudioBuffer<float> latencyBlock(2, 256);
+            juce::MidiBuffer latencyMidi;
+            setParameter(latencyRevert, rl::params::leftFreeMs, 300.0f);
+            latencyBlock.clear();
+            latencyRevert.processBlock(latencyBlock, latencyMidi);
+            setParameter(latencyRevert, rl::params::leftFreeMs, 100.0f);
+            for (int blockIndex = 0; blockIndex < 64; ++blockIndex)
+            {
+                latencyBlock.clear();
+                latencyRevert.processBlock(latencyBlock, latencyMidi);
+            }
+            latencyRevert.servicePendingHostUpdatesForTesting();
+            expectEquals(latencyRevert.getLatencySamples(), 4800,
+                         "The reverted engine length must replace the stale pending latency");
+        }
 
         beginTest("Factory programs are applied by the message-thread service");
         ReverseLabAudioProcessor presetProcessor;

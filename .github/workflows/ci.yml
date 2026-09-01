@@ -27,7 +27,7 @@ jobs:
           vtool -show-build "$bin" | grep -E "minos +11\.0"
       - name: Preserve VST3 bundle permissions
         run: ditto -c -k --sequesterRsrc --keepParent build/ReverseLab_artefacts/Release/VST3/ReverseLab.vst3 ReverseLab-VST3.zip
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v6
         with:
           name: ReverseLab-VST3-${{ github.sha }}
           path: ReverseLab-VST3.zip

@@ -52,14 +52,14 @@ ReverseLabLookAndFeel::ReverseLabLookAndFeel()
 void ReverseLabLookAndFeel::drawRotarySlider(juce::Graphics& g, int x, int y, int w, int h,
                                               float position, float start, float end, juce::Slider& slider)
 {
-    const auto sizeControl = slider.getName().containsIgnoreCase("size");
+    const auto sizeControl = static_cast<bool>(slider.getProperties().getWithDefault(rl::ui::sizeControlProperty, false));
     const auto bounds = juce::Rectangle<float>(x, y, w, h).reduced(sizeControl ? 8.0f : 7.0f);
     const auto diameter = juce::jmin(bounds.getWidth(), bounds.getHeight());
     const auto circle = bounds.withSizeKeepingCentre(diameter, diameter);
     const auto radius = diameter * 0.5f;
     const auto centre = circle.getCentre();
     const auto angle = start + position * (end - start);
-    const auto activeColour = slider.getName().startsWithIgnoreCase("right") ? violet : accent;
+    const auto activeColour = static_cast<bool>(slider.getProperties().getWithDefault(rl::ui::violetProperty, false)) ? violet : accent;
 
     g.setColour(background.withAlpha(0.72f)); g.fillEllipse(circle);
     g.setColour(border.withAlpha(0.85f)); g.drawEllipse(circle, sizeControl ? 2.0f : 1.0f);
@@ -82,7 +82,7 @@ void ReverseLabLookAndFeel::drawToggleButton(juce::Graphics& g, juce::ToggleButt
 {
     auto bounds = button.getLocalBounds().toFloat().reduced(1.0f);
     const auto active = button.getToggleState();
-    const auto activeColour = button.getButtonText().containsIgnoreCase("retrigger") ? violet : accent;
+    const auto activeColour = static_cast<bool>(button.getProperties().getWithDefault(rl::ui::violetProperty, false)) ? violet : accent;
     auto fill = active ? activeColour.withAlpha(down ? 0.30f : 0.18f) : raised.withAlpha(0.72f);
     if (highlighted) fill = fill.brighter(0.08f);
     g.setColour(fill); g.fillRoundedRectangle(bounds, 6.0f);
@@ -192,6 +192,7 @@ ReverseLabAudioProcessorEditor::ReverseLabAudioProcessorEditor(ReverseLabAudioPr
     configureButton(link, "LINK L/R", rl::params::link, linkAttachment);
     configureButton(freeze, "FREEZE", rl::params::freeze, freezeAttachment);
     configureButton(retrigger, "RETRIGGER", rl::params::retrigger, retriggerAttachment);
+    retrigger.getProperties().set(rl::ui::violetProperty, true);
     configureButton(bypass, "BYPASS", rl::params::bypass, bypassAttachment);
     freeze.setDescription("Hold the current reverse buffer");
     retrigger.setDescription("Restart the reverse section momentarily");
@@ -219,8 +220,11 @@ void ReverseLabAudioProcessorEditor::configureFreeControl(juce::Slider& slider, 
     slider.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 92, 22);
     slider.setTitle(name);
     slider.setDescription(name + " from 20 to 4000 milliseconds");
+    slider.getProperties().set(rl::ui::violetProperty, name.startsWith("RIGHT"));
     slider.textFromValueFunction = [](double value) { return juce::String(value, value < 100.0 ? 1 : 0) + " ms"; };
     attachment = std::make_unique<SliderAttachment>(pluginProcessor.parameters, id, slider);
+    if (auto* parameter = pluginProcessor.parameters.getParameter(id))
+        slider.setDoubleClickReturnValue(true, parameter->convertFrom0to1(parameter->getDefaultValue()));
     addAndMakeVisible(slider);
 }
 
@@ -240,6 +244,8 @@ void ReverseLabAudioProcessorEditor::configureSizeControl(juce::Slider& slider, 
     slider.setRange(0.0, 14.0, 1.0);
     slider.setTitle(name);
     slider.setDescription(name + " reverse segment length");
+    slider.getProperties().set(rl::ui::sizeControlProperty, true);
+    slider.getProperties().set(rl::ui::violetProperty, name.startsWith("RIGHT"));
     slider.textFromValueFunction = [this](double value)
     {
         const auto index = juce::jlimit(0, 14, static_cast<int>(std::round(value)));
@@ -253,6 +259,8 @@ void ReverseLabAudioProcessorEditor::configureSizeControl(juce::Slider& slider, 
     label.setFont(juce::Font(juce::FontOptions(12.0f, juce::Font::bold)));
     label.setJustificationType(juce::Justification::centred);
     attachment = std::make_unique<SliderAttachment>(pluginProcessor.parameters, id, slider);
+    if (auto* parameter = pluginProcessor.parameters.getParameter(id))
+        slider.setDoubleClickReturnValue(true, parameter->convertFrom0to1(parameter->getDefaultValue()));
     addAndMakeVisible(slider); addAndMakeVisible(label);
 }
 
@@ -261,8 +269,8 @@ void ReverseLabAudioProcessorEditor::configureKnob(Knob& knob, const juce::Strin
     knob.slider.setName(name);
     knob.slider.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
     knob.slider.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 72, 18);
-    auto* parameter = pluginProcessor.parameters.getParameter(id);
-    knob.slider.setDoubleClickReturnValue(true, parameter->convertFrom0to1(parameter->getDefaultValue()));
+    if (auto* parameter = pluginProcessor.parameters.getParameter(id))
+        knob.slider.setDoubleClickReturnValue(true, parameter->convertFrom0to1(parameter->getDefaultValue()));
     knob.slider.setTitle(name); knob.slider.setDescription(name + " parameter");
     knob.label.setText(name, juce::dontSendNotification);
     knob.label.setColour(juce::Label::textColourId, muted);

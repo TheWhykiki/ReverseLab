@@ -17,6 +17,19 @@ public:
     juce::Optional<PositionInfo> getPosition() const override { return position; }
     PositionInfo position;
 };
+
+// Click detector: tracks the largest sample-to-sample step of a signal. For a sine of amplitude A and
+// angular frequency w read at up to `speed` times real time, a clean signal never exceeds A * w * speed.
+struct ClickDetector
+{
+    float previous = 0.0f;
+    float maxDelta = 0.0f;
+    void push(float value) noexcept { maxDelta = juce::jmax(maxDelta, std::abs(value - previous)); previous = value; }
+    static float threshold(float amplitude, float angularFrequency, float maxSpeed) noexcept
+    {
+        return amplitude * angularFrequency * maxSpeed * 3.0f; // 3x headroom for crossfades and interpolation
+    }
+};
 }
 
 class ReverseEngineTests final : public juce::UnitTest
@@ -154,6 +167,60 @@ public:
             engine.advance();
         }
         expectWithinAbsoluteError(resetEnergy, 0.0f, 0.0001f);
+
+        beginTest("Speed automation changes read velocity, not read position (no clicks)");
+        {
+            rl::ReverseEngine speedEngine;
+            speedEngine.prepare(48000.0, 48000);
+            rl::EngineSettings s;
+            s.leftLength = s.rightLength = 24000;
+            s.crossfade = 0.04f;
+            constexpr float amplitude = 0.5f;
+            constexpr float w = juce::MathConstants<float>::twoPi * 500.0f / 48000.0f;
+            ClickDetector detector;
+            int n = 0;
+            auto step = [&](float speed, bool measure)
+            {
+                s.speed = speed;
+                const auto in = amplitude * std::sin(w * static_cast<float>(n++));
+                const auto y = speedEngine.processSample(0, in, s);
+                (void) speedEngine.processSample(1, in, s);
+                speedEngine.advance();
+                if (measure) detector.push(y); else detector.previous = y;
+            };
+            for (int i = 0; i < 44000; ++i) step(1.0f, false);                                  // silent first segment + 20k samples into the second
+            for (int i = 0; i < 1200; ++i) step(1.0f + static_cast<float>(i + 1) / 1200.0f, true); // 25 ms ramp 1x -> 2x, like the processor smoother
+            for (int i = 0; i < 3000; ++i) step(2.0f, true);                                    // hold across a segment boundary
+            expectLessThan(detector.maxDelta, ClickDetector::threshold(amplitude, w, 2.0f),
+                           "Speed ramp late in a segment must not scrub the read head");
+        }
+
+        beginTest("Maximum-length 4x playback never wraps through the live writer");
+        {
+            rl::ReverseEngine longEngine;
+            constexpr int capacity = 4096;
+            constexpr int length = capacity - 8;
+            longEngine.prepare(48000.0, length);
+            rl::EngineSettings s;
+            s.leftLength = s.rightLength = length;
+            s.speed = 4.0f;
+            s.crossfade = 0.04f;
+            float heldMinimum = 10.0f, heldMaximum = -10.0f;
+            for (int n = 0; n < length + 1800; ++n)
+            {
+                const auto input = 0.5f * std::sin(0.071f * static_cast<float>(n));
+                const auto output = longEngine.processSample(0, input, s);
+                (void) longEngine.processSample(1, input, s);
+                longEngine.advance();
+                if (n >= length + 1300)
+                {
+                    heldMinimum = juce::jmin(heldMinimum, output);
+                    heldMaximum = juce::jmax(heldMaximum, output);
+                }
+            }
+            expectLessThan(heldMaximum - heldMinimum, 0.001f,
+                           "Exhausted history must hold instead of reading newly written samples");
+        }
     }
 };
 
@@ -333,6 +400,117 @@ public:
             if ((blockIndex & 15) == 0)
                 randomLatency.servicePendingHostUpdatesForTesting();
             expectEquals(randomLatency.getLatencySamples(), stableLatency);
+        }
+
+        beginTest("Speed parameter automation is click-free through the full processor");
+        {
+            ReverseLabAudioProcessor automated;
+            setParameter(automated, rl::params::sync, 0.0f);
+            setParameter(automated, rl::params::link, 1.0f);
+            setParameter(automated, rl::params::leftFreeMs, 500.0f);
+            setParameter(automated, rl::params::mix, 100.0f);
+            setParameter(automated, rl::params::feedback, 0.0f);
+            setParameter(automated, rl::params::random, 0.0f);
+            setParameter(automated, rl::params::stereoOffset, 0.0f);
+            setParameter(automated, rl::params::speed, 1.0f);
+            automated.prepareToPlay(48000.0, 256);
+            constexpr float amplitude = 0.5f;
+            constexpr float w = juce::MathConstants<float>::twoPi * 500.0f / 48000.0f;
+            ClickDetector detector;
+            juce::AudioBuffer<float> autoBlock(2, 256);
+            int absolute = 0;
+            for (int blockIndex = 0; blockIndex < 220; ++blockIndex)
+            {
+                if (blockIndex == 170) setParameter(automated, rl::params::speed, 2.0f); // ~20k samples into the 2nd segment
+                for (int i = 0; i < 256; ++i)
+                {
+                    const auto value = amplitude * std::sin(w * static_cast<float>(absolute + i));
+                    autoBlock.setSample(0, i, value);
+                    autoBlock.setSample(1, i, value);
+                }
+                automated.processBlock(autoBlock, midi);
+                for (int i = 0; i < 256; ++i)
+                {
+                    if (blockIndex >= 170) detector.push(autoBlock.getSample(0, i));
+                    else detector.previous = autoBlock.getSample(0, i);
+                }
+                absolute += 256;
+            }
+            expectLessThan(detector.maxDelta, ClickDetector::threshold(amplitude, w, 2.0f),
+                           "Smoothed speed automation must stay click-free end to end");
+        }
+
+        beginTest("Shortening the segment length is click-free across the wet alignment tap");
+        {
+            // A shorter segment makes the engine's active length drop at a segment boundary while
+            // the host still reports the old, longer latency. The wet alignment offset therefore
+            // jumps from 0 to (old - new) = 5280 samples; that change must be crossfaded, not
+            // switched. Several non-commensurate test tones make sure a hard tap switch cannot
+            // hide behind a whole-period offset or a lucky phase at the switch instant.
+            for (const auto frequency : { 440.0f, 631.0f, 977.0f })
+            {
+                ReverseLabAudioProcessor shortening;
+                setParameter(shortening, rl::params::sync, 0.0f);
+                setParameter(shortening, rl::params::link, 1.0f);
+                setParameter(shortening, rl::params::leftFreeMs, 300.0f);
+                setParameter(shortening, rl::params::mix, 100.0f);
+                setParameter(shortening, rl::params::feedback, 0.0f);
+                setParameter(shortening, rl::params::random, 0.0f);
+                setParameter(shortening, rl::params::stereoOffset, 0.0f);
+                shortening.prepareToPlay(48000.0, 256);
+                constexpr float amplitude = 0.5f;
+                const float w = juce::MathConstants<float>::twoPi * frequency / 48000.0f;
+                ClickDetector detector;
+                juce::AudioBuffer<float> lengthBlock(2, 256);
+                int absolute = 0;
+                for (int blockIndex = 0; blockIndex < 400; ++blockIndex)
+                {
+                    if (blockIndex == 120) setParameter(shortening, rl::params::leftFreeMs, 190.0f);
+                    for (int i = 0; i < 256; ++i)
+                    {
+                        const auto value = amplitude * std::sin(w * static_cast<float>(absolute + i));
+                        lengthBlock.setSample(0, i, value);
+                        lengthBlock.setSample(1, i, value);
+                    }
+                    shortening.processBlock(lengthBlock, midi);
+                    if ((blockIndex & 15) == 0) shortening.servicePendingHostUpdatesForTesting();
+                    for (int i = 0; i < 256; ++i)
+                    {
+                        if (blockIndex >= 120) detector.push(lengthBlock.getSample(0, i));
+                        else detector.previous = lengthBlock.getSample(0, i);
+                    }
+                    absolute += 256;
+                }
+                expectEquals(shortening.getCurrentLatencySamples(), 9120);
+                logMessage("  " + juce::String(frequency, 0) + " Hz: max step " + juce::String(detector.maxDelta, 4)
+                           + " (limit " + juce::String(ClickDetector::threshold(amplitude, w, 1.0f), 4) + ")");
+                expectLessThan(detector.maxDelta, ClickDetector::threshold(amplitude, w, 1.0f),
+                               "Segment shortening must crossfade the wet alignment tap");
+            }
+        }
+
+        beginTest("processBlock before prepareToPlay passes audio through unharmed");
+        {
+            ReverseLabAudioProcessor unprepared2;
+            juce::AudioBuffer<float> raw(2, 64);
+            for (int i = 0; i < 64; ++i) { raw.setSample(0, i, 0.25f); raw.setSample(1, i, -0.25f); }
+            unprepared2.processBlock(raw, midi);
+            expectWithinAbsoluteError(raw.getSample(0, 10), 0.25f, 0.0001f);
+            expectWithinAbsoluteError(raw.getSample(1, 10), -0.25f, 0.0001f);
+        }
+
+        beginTest("prepareToPlay reports latency from the host tempo when available");
+        {
+            ReverseLabAudioProcessor tempoAware;
+            setParameter(tempoAware, rl::params::sync, 1.0f);
+            setParameter(tempoAware, rl::params::link, 1.0f);
+            setParameter(tempoAware, rl::params::leftSize, 8.0f); // 1/4
+            TestPlayHead hostAt90;
+            hostAt90.position.setBpm(90.0);
+            tempoAware.setPlayHead(&hostAt90);
+            tempoAware.prepareToPlay(48000.0, 64);
+            expectEquals(tempoAware.getLatencySamples(), 32000); // 60 / 90 * 48000
+            tempoAware.setPlayHead(nullptr);
         }
 
         beginTest("Reported tail follows feedback decay");

@@ -2,8 +2,11 @@
 set -euo pipefail
 
 configuration="${1:-Release}"
-version="${2:-1.0.0}"
 project_root="$(cd "$(dirname "$0")/.." && pwd)"
+# The version is defined once in CMakeLists.txt (project(... VERSION x.y.z)); pass a second
+# argument only to override it deliberately.
+cmake_version="$(sed -nE 's/^project\(ReverseLab VERSION ([0-9.]+).*/\1/p' "$project_root/CMakeLists.txt")"
+version="${2:-${cmake_version:-1.0.0}}"
 plugin="$project_root/build/ReverseLab_artefacts/$configuration/VST3/ReverseLab.vst3"
 dist="$project_root/dist"
 stage="$(mktemp -d)"

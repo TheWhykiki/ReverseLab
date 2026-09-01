@@ -6,7 +6,7 @@ ReverseLab is a tempo-synchronised stereo reverse effect for Cubase on macOS.
 
 Download the current `.pkg` from [GitHub Releases](https://github.com/TheWhykiki/ReverseLab/releases/latest), open it, and follow the installer. It installs the universal VST3 into `/Library/Audio/Plug-Ins/VST3`. Restart Cubase or trigger a plug-in rescan afterwards.
 
-Because the current package is ad-hoc signed rather than Apple-notarized, macOS may require **Control-click → Open** on first launch. The release also includes the raw VST3 as a ZIP and SHA-256 checksums.
+Because the current package is ad-hoc signed rather than Developer-ID signed and Apple-notarized, Gatekeeper will block it on first launch. On macOS 14 and earlier, **Control-click → Open** on the `.pkg` works; on macOS 15 (Sequoia) the Control-click bypass no longer exists — open the file once, then go to **System Settings → Privacy & Security** and choose **Open Anyway**. Alternatively unzip the raw VST3 from the release, copy it to `~/Library/Audio/Plug-Ins/VST3`, and remove the quarantine flag with `xattr -dr com.apple.quarantine ~/Library/Audio/Plug-Ins/VST3/ReverseLab.vst3`. The release also includes SHA-256 checksums.
 
 ## Build
 
@@ -38,6 +38,10 @@ The currently verified local installation uses the user-level VST3 directory, wh
 - Six factory programs and full Cubase automation/state restoration
 
 Changing segment length changes the reported plug-in latency. Cubase compensates other tracks, while ReverseLab delays its dry path internally to maintain alignment.
+
+## Continuous integration
+
+Every push and pull request builds the universal VST3 and runs the DSP/processor test suite on a macOS runner, and additionally compiles and runs the test suite on Linux (DSP-only, no plug-in bundle) for fast feedback. See `.github/workflows/ci.yml`.
 
 ## Verified release
 

@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  macos:
+    name: macOS universal build + tests
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      - name: Configure
+        run: cmake -S . -B build -G Xcode -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build --config Release --target ReverseLab_VST3 ReverseLabTests
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
+      - name: Verify universal slices and deployment target
+        run: |
+          bin="build/ReverseLab_artefacts/Release/VST3/ReverseLab.vst3/Contents/MacOS/ReverseLab"
+          lipo -archs "$bin" | tee /dev/stderr | grep -q "arm64"
+          lipo -archs "$bin" | grep -q "x86_64"
+          vtool -show-build "$bin" | grep -E "minos +11\.0"
+      - name: Preserve VST3 bundle permissions
+        run: ditto -c -k --sequesterRsrc --keepParent build/ReverseLab_artefacts/Release/VST3/ReverseLab.vst3 ReverseLab-VST3.zip
+      - uses: actions/upload-artifact@v6
+        with:
+          name: ReverseLab-VST3-${{ github.sha }}
+          path: ReverseLab-VST3.zip
+
+  linux-tests:
+    name: Linux DSP/processor tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      - name: Install JUCE build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libfreetype-dev libfontconfig1-dev \
+            libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxext-dev libgl1-mesa-dev
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - name: Build tests
+        run: cmake --build build --target ReverseLabTests -j"$(nproc)"
+      - name: Test
+        run: ctest --test-dir build --output-on-failure

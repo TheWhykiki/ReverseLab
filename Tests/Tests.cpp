@@ -17,6 +17,19 @@ public:
     juce::Optional<PositionInfo> getPosition() const override { return position; }
     PositionInfo position;
 };
+
+// Click detector: tracks the largest sample-to-sample step of a signal. For a sine of amplitude A and
+// angular frequency w read at up to `speed` times real time, a clean signal never exceeds A * w * speed.
+struct ClickDetector
+{
+    float previous = 0.0f;
+    float maxDelta = 0.0f;
+    void push(float value) noexcept { maxDelta = juce::jmax(maxDelta, std::abs(value - previous)); previous = value; }
+    static float threshold(float amplitude, float angularFrequency, float maxSpeed) noexcept
+    {
+        return amplitude * angularFrequency * maxSpeed * 3.0f; // 3x headroom for crossfades and interpolation
+    }
+};
 }
 
 class ReverseEngineTests final : public juce::UnitTest
@@ -154,6 +167,33 @@ public:
             engine.advance();
         }
         expectWithinAbsoluteError(resetEnergy, 0.0f, 0.0001f);
+
+        beginTest("Speed automation changes read velocity, not read position (no clicks)");
+        {
+            rl::ReverseEngine speedEngine;
+            speedEngine.prepare(48000.0, 48000);
+            rl::EngineSettings s;
+            s.leftLength = s.rightLength = 24000;
+            s.crossfade = 0.04f;
+            constexpr float amplitude = 0.5f;
+            constexpr float w = juce::MathConstants<float>::twoPi * 500.0f / 48000.0f;
+            ClickDetector detector;
+            int n = 0;
+            auto step = [&](float speed, bool measure)
+            {
+                s.speed = speed;
+                const auto in = amplitude * std::sin(w * static_cast<float>(n++));
+                const auto y = speedEngine.processSample(0, in, s);
+                (void) speedEngine.processSample(1, in, s);
+                speedEngine.advance();
+                if (measure) detector.push(y); else detector.previous = y;
+            };
+            for (int i = 0; i < 44000; ++i) step(1.0f, false);                                  // silent first segment + 20k samples into the second
+            for (int i = 0; i < 1200; ++i) step(1.0f + static_cast<float>(i + 1) / 1200.0f, true); // 25 ms ramp 1x -> 2x, like the processor smoother
+            for (int i = 0; i < 3000; ++i) step(2.0f, true);                                    // hold across a segment boundary
+            expectLessThan(detector.maxDelta, ClickDetector::threshold(amplitude, w, 2.0f),
+                           "Speed ramp late in a segment must not scrub the read head");
+        }
     }
 };
 
@@ -333,6 +373,44 @@ public:
             if ((blockIndex & 15) == 0)
                 randomLatency.servicePendingHostUpdatesForTesting();
             expectEquals(randomLatency.getLatencySamples(), stableLatency);
+        }
+
+        beginTest("Speed parameter automation is click-free through the full processor");
+        {
+            ReverseLabAudioProcessor automated;
+            setParameter(automated, rl::params::sync, 0.0f);
+            setParameter(automated, rl::params::link, 1.0f);
+            setParameter(automated, rl::params::leftFreeMs, 500.0f);
+            setParameter(automated, rl::params::mix, 100.0f);
+            setParameter(automated, rl::params::feedback, 0.0f);
+            setParameter(automated, rl::params::random, 0.0f);
+            setParameter(automated, rl::params::stereoOffset, 0.0f);
+            setParameter(automated, rl::params::speed, 1.0f);
+            automated.prepareToPlay(48000.0, 256);
+            constexpr float amplitude = 0.5f;
+            constexpr float w = juce::MathConstants<float>::twoPi * 500.0f / 48000.0f;
+            ClickDetector detector;
+            juce::AudioBuffer<float> autoBlock(2, 256);
+            int absolute = 0;
+            for (int blockIndex = 0; blockIndex < 220; ++blockIndex)
+            {
+                if (blockIndex == 170) setParameter(automated, rl::params::speed, 2.0f); // ~20k samples into the 2nd segment
+                for (int i = 0; i < 256; ++i)
+                {
+                    const auto value = amplitude * std::sin(w * static_cast<float>(absolute + i));
+                    autoBlock.setSample(0, i, value);
+                    autoBlock.setSample(1, i, value);
+                }
+                automated.processBlock(autoBlock, midi);
+                for (int i = 0; i < 256; ++i)
+                {
+                    if (blockIndex >= 170) detector.push(autoBlock.getSample(0, i));
+                    else detector.previous = autoBlock.getSample(0, i);
+                }
+                absolute += 256;
+            }
+            expectLessThan(detector.maxDelta, ClickDetector::threshold(amplitude, w, 2.0f),
+                           "Smoothed speed automation must stay click-free end to end");
         }
 
         beginTest("Reported tail follows feedback decay");

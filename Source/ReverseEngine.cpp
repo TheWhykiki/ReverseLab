@@ -85,6 +85,8 @@ void ReverseEngine::beginSegment(int channel, int requestedLength, const EngineS
     const auto channelOffset = static_cast<int>(stereo * 0.5f * head.activeLength);
     head.segmentEnd = wrap(writePosition - 1 - randomOffset - channelOffset);
     head.phase = 0.0f;
+    head.readOffset = 0.0f;
+    head.transitionPhase = 0.0f;
     head.nextPrepared = false;
 }
 
@@ -115,31 +117,43 @@ float ReverseEngine::processSample(int channel, float input, const EngineSetting
     {
         if (head.nextPrepared)
         {
-            const auto fadeAdvance = juce::jlimit(1.0f, head.activeLength * 0.25f,
-                                                  head.activeLength * settings.crossfade);
+            // Continue exactly where the incoming segment was being read during the crossfade.
             head.segmentEnd = head.nextEnd;
             head.activeLength = head.nextLength;
-            head.phase = fadeAdvance;
+            head.phase = head.transitionPhase;
+            head.readOffset = head.nextOffset;
             head.nextPrepared = false;
         }
         else
             beginSegment(channel, requested, settings);
     }
 
-    const auto readPosition = static_cast<float>(head.segmentEnd) - head.phase * settings.speed;
-    auto wet = readInterpolated(channel, readPosition);
+    // The read offset is integrated per sample (readOffset += speed) instead of being derived
+    // from phase * speed, so speed automation changes the read velocity, not the read position.
+    // At speeds above 1x a segment reads speed * length samples of history; hold at the oldest
+    // valid sample instead of wrapping around into material written after the segment started.
+    const auto maximumReadOffset = static_cast<float>(capacity - 8);
+    head.readOffset = juce::jmin(head.readOffset, maximumReadOffset);
+    head.nextOffset = juce::jmin(head.nextOffset, maximumReadOffset);
+    auto wet = readInterpolated(channel, static_cast<float>(head.segmentEnd) - head.readOffset);
 
     const auto fadeSamples = juce::jlimit(1.0f, head.activeLength * 0.25f,
                                          head.activeLength * settings.crossfade);
     const auto transitionStart = static_cast<float>(head.activeLength) - fadeSamples;
     if (head.phase >= transitionStart)
     {
-        if (!head.nextPrepared) prepareNextSegment(channel, requested, settings);
-        const auto transition = juce::jlimit(0.0f, 1.0f, (head.phase - transitionStart) / fadeSamples);
-        const auto nextPosition = static_cast<float>(head.nextEnd) - (head.phase - transitionStart) * settings.speed;
-        const auto nextWet = readInterpolated(channel, nextPosition);
+        if (!head.nextPrepared)
+        {
+            prepareNextSegment(channel, requested, settings);
+            head.nextOffset = 0.0f;
+            head.transitionPhase = 0.0f;
+        }
+        const auto transition = juce::jlimit(0.0f, 1.0f, head.transitionPhase / fadeSamples);
+        const auto nextWet = readInterpolated(channel, static_cast<float>(head.nextEnd) - head.nextOffset);
         wet = wet * std::cos(transition * juce::MathConstants<float>::halfPi)
               + nextWet * std::sin(transition * juce::MathConstants<float>::halfPi);
+        head.nextOffset += settings.speed;
+        head.transitionPhase += 1.0f;
     }
 
     if (settings.speed > 1.0f)
@@ -161,6 +175,7 @@ float ReverseEngine::processSample(int channel, float input, const EngineSetting
     }
 
     head.phase += 1.0f;
+    head.readOffset += settings.speed;
     publishedPhase[(size_t) channel].store(
         juce::jlimit(0.0f, 1.0f, head.phase / static_cast<float>(juce::jmax(1, head.activeLength))),
         std::memory_order_relaxed);

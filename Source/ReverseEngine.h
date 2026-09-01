@@ -42,6 +42,9 @@ private:
     struct Head
     {
         float phase = 0.0f;
+        float readOffset = 0.0f;       // samples read back from segmentEnd (accumulated, speed-integrated)
+        float nextOffset = 0.0f;       // same for the incoming segment during the crossfade
+        float transitionPhase = 0.0f;  // samples elapsed since the crossfade started
         int segmentEnd = 0;
         int activeLength = 1;
         int nextEnd = 0;

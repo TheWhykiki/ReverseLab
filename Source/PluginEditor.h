@@ -3,6 +3,14 @@
 #include <juce_gui_extra/juce_gui_extra.h>
 #include "PluginProcessor.h"
 
+namespace rl::ui
+{
+// Component properties consumed by the LookAndFeel. Styling keys off these instead of matching
+// control names/captions, so renaming or localising a label cannot silently change the look.
+inline constexpr auto sizeControlProperty = "rl.sizeControl"; // bool: large timing control ring
+inline constexpr auto violetProperty = "rl.violet";           // bool: right-channel / retrigger accent
+} // namespace rl::ui
+
 class ReverseLabLookAndFeel final : public juce::LookAndFeel_V4
 {
 public:

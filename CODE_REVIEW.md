@@ -30,6 +30,16 @@
 26. **Real-time program changes** — `setCurrentProgram()` now publishes only an atomic request when called outside the message thread. The processor timer applies the parameter batch and host notifications safely, and the editor follows host-originated preset changes without feedback.
 27. **Meter-aware tail reporting** — the published tail now uses the latest host time signature instead of assuming 4/4, matching the DSP's Bar/2-Bar segment length in asymmetric meters.
 
+28. **Speed automation scrubbed the read head** — the read position was derived as `phase * speed`, so a smoothed speed change late in a segment moved the read position by `phase * Δspeed` per sample (a 1×→2× ramp 20 000 samples into a segment jumped ~17 samples per sample). The engine now integrates the read offset per sample (`readOffset += speed`); speed automation changes read velocity only. A click-detector regression on engine and processor level covers this.
+29. **Read head could wrap into the write head** — at speeds above 1× a segment reads `speed × length` of history, which exceeded the ring at long segments (2 Bars at slow tempos ×4). The read offset is now clamped to the ring capacity and holds at the oldest valid sample instead of wrapping around into freshly written material.
+30. **Hard wet-alignment tap switch at segment boundaries** — the wet alignment offset depends on the engine's active segment length, which changes at a segment boundary before the host has acknowledged the new latency; shortening a segment switched the tap by `old − new` samples without a crossfade. Every wet tap offset change is now crossfaded per channel over the same 10 ms equal-power transition used for the dry path. A multi-tone regression (440/631/977 Hz, 300 ms → 190 ms) covers it.
+31. **Block-size-dependent tempo smoothing** — `smoothedBpm` used a fixed per-block coefficient, so tempo tracking was 32× faster at 2048-sample blocks than at 64. The smoothing is now expressed in time (~65 ms).
+32. **Startup latency assumed 120 BPM 4/4** — `prepareToPlay()` now reads the host tempo and meter from the play head when available, so the latency reported at preparation matches the first processed segment.
+33. **`processBlock()` before `prepareToPlay()`** — would have divided by a zero delay capacity. Audio now passes through unchanged until the processor is prepared.
+34. **Stringly-typed editor styling** — the LookAndFeel chose ring width and accent colour by matching control names and button captions. Styling now keys off component properties (`rl.sizeControl`, `rl.violet`); Size and Free-Time controls also gained the double-click-to-default behaviour the other knobs already had.
+35. **Parameter identifiers without version hints** — all parameters now use `juce::ParameterID { id, 1 }`. VST3 identifiers are derived from the string alone and are unchanged; an AU build would now get stable identifiers too.
+36. **Build portability and CI** — the universal/deployment-target cache overrides are Apple-only, so the DSP/processor suite configures and runs on Linux; `.github/workflows/ci.yml` builds the universal VST3 and runs the tests on macOS and additionally runs the suite on Linux. `package-release.sh` reads the version from `CMakeLists.txt`.
+
 ## Verification
 
 - Release build succeeds for `arm64` and `x86_64`.
@@ -44,6 +54,8 @@
 - REAPER 7.79 (native arm64) discovers and instantiates ReverseLab as VST3, exposes 26 parameters in the current build, saves/restores the plug-in in an `.rpp`, and completes a four-second offline render at 44.1 kHz/24-bit stereo without clipped samples.
 - A separate REAPER stress project creates 32 parallel ReverseLab instances, varies timing, speed, crossfade, feedback, randomisation, and stereo offset, saves all 32 VST3 states, and completes a two-second offline render without clipped samples.
 
+- The full suite (22 test groups) passes on a Linux x86_64 build of the shared code; the two click-detector regressions and the wet-tap regression were confirmed to fail against the previous engine/processor before the fixes were applied.
+
 ## Remaining limits
 
 - The anti-alias stage is a pragmatic real-time one-pole reconstruction filter, not a long-window polyphase resampler. It is appropriate for version 1 but extreme 4× material can still contain more aliasing than an offline-quality resampler.
@@ -51,3 +63,7 @@
 - Freeze audio is intentionally not serialized, matching the product contract.
 - A silent preview cannot validate the visual density of real program material; this is covered only when audio flows in Cubase.
 - Cubase still needs a short listening/automation/offline-render acceptance pass inside a real user project; its scanner and REAPER's independent native instantiation/offline-render path are green.
+- The 32 s ring plus dry and wet alignment delays cost roughly 36 MB per instance at 48 kHz (three stereo float buffers); 32 instances exceed 1 GB. Reducing the maximum segment to 16 s would halve this without affecting any tempo-sync value at 40 BPM or above.
+- Feedback is taken from the engine output before the high-/low-pass stage, so the filters shape only the output and not the repeats. "Frozen Texture" combines Freeze with a feedback amount that has no effect while frozen.
+- `ReverseLabTests` links both the shared-code target and the JUCE modules directly, which compiles every JUCE module twice and produces a `JUCE_STANDALONE_APPLICATION` redefinition warning; linking the tests against `ReverseLab` alone would halve build time.
+- The repository has no LICENSE file; JUCE 8 usage terms (AGPLv3 or a JUCE plan) and the terms for ReverseLab's own code should be stated explicitly.

@@ -24,6 +24,7 @@ class ReverseEngine
 {
 public:
     void prepare(double newSampleRate, int maximumLengthSamples);
+    void release();
     void reset() noexcept;
     float processSample(int channel, float input, const EngineSettings& settings) noexcept;
     [[nodiscard]] int getWritePosition() const noexcept { return writePosition; }
@@ -34,6 +35,12 @@ public:
     [[nodiscard]] int getActiveLength(int channel) const noexcept
     {
         return heads[(size_t) juce::jlimit(0, 1, channel)].activeLength;
+    }
+    [[nodiscard]] size_t getAllocatedStorageBytes() const noexcept
+    {
+        return static_cast<size_t>(ring.getNumChannels()) * static_cast<size_t>(ring.getNumSamples())
+                   * sizeof(float)
+               + generations.capacity() * sizeof(uint32_t);
     }
     void advance() noexcept;
     void setSeed(uint32_t seed) noexcept;

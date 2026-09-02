@@ -14,6 +14,21 @@ void ReverseEngine::prepare(double newSampleRate, int maximumLengthSamples)
     reset();
 }
 
+void ReverseEngine::release()
+{
+    ring.setSize(0, 0, false, false, false);
+    std::vector<uint32_t>().swap(generations);
+    capacity = 1;
+    writePosition = 0;
+    generation = 1;
+    wroteCurrentPosition = false;
+    for (size_t channel = 0; channel < heads.size(); ++channel)
+    {
+        heads[channel] = {};
+        publishedPhase[channel].store(0.0f, std::memory_order_relaxed);
+    }
+}
+
 void ReverseEngine::reset() noexcept
 {
     if (++generation == 0)

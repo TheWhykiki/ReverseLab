@@ -8,7 +8,9 @@ ReverseLabAudioProcessor::ReverseLabAudioProcessor()
                                       .withOutput("Output", juce::AudioChannelSet::stereo(), true)),
       parameters(*this, nullptr, "ReverseLabState", rl::params::createLayout())
 {
-    for (auto& value : scope) value.store(0.0f);
+    for (auto& channel : scope)
+        for (auto& value : channel)
+            value.store(0.0f);
     startTimerHz(30);
 }
 
@@ -97,6 +99,23 @@ void ReverseLabAudioProcessor::prepareToPlay(double sampleRate, int)
     pendingLatency.store(activeProcessingLatency);
     acknowledgedLatency.store(activeProcessingLatency);
     setLatencySamples(activeProcessingLatency);
+}
+
+void ReverseLabAudioProcessor::releaseResources()
+{
+    engine.release();
+    dryDelay.setSize(0, 0, false, false, false);
+    wetAlignmentDelay.setSize(0, 0, false, false, false);
+    dryWrite = wetWrite = 0;
+    validDelaySamples = 0;
+    filterState = {};
+    wetTaps = {};
+    wasPlaying = false;
+    previousBlockPosition.reset();
+    for (auto& channel : scope)
+        for (auto& value : channel)
+            value.store(0.0f, std::memory_order_relaxed);
+    scopeWrite.store(0, std::memory_order_release);
 }
 
 int ReverseLabAudioProcessor::calculateLengthSamples(int choice, float freeMs, double bpm,
@@ -327,7 +346,7 @@ void ReverseLabAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, ju
         const auto hp = smoothedHighpass.getNextValue();
         const auto lp = smoothedLowpass.getNextValue();
         const auto monoInput = buffer.getSample(0, sample);
-        float scopeValue = 0.0f;
+        std::array<float, 2> scopeValues {};
         for (int channel = 0; channel < channels; ++channel)
         {
             const auto input = buffer.getSample(channel, sample);
@@ -372,10 +391,13 @@ void ReverseLabAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, ju
             auto output = processed + bypassAmount * (dry - processed);
             if (!std::isfinite(output)) output = 0.0f;
             buffer.setSample(channel, sample, output);
-            scopeValue += output / static_cast<float>(channels);
+            scopeValues[(size_t) channel] = output;
         }
         if (channels == 1)
+        {
             (void) engine.processSample(1, monoInput, settings);
+            scopeValues[1] = scopeValues[0];
+        }
         engine.advance();
         dryWrite = (dryWrite + 1) % delayCapacity;
         wetWrite = (wetWrite + 1) % delayCapacity;
@@ -384,8 +406,9 @@ void ReverseLabAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, ju
         if ((sample & 15) == 0)
         {
             auto index = scopeWrite.load(std::memory_order_relaxed);
-            scope[(size_t) index].store(scopeValue, std::memory_order_relaxed);
-            scopeWrite.store((index + 1) % static_cast<int>(scope.size()), std::memory_order_release);
+            for (size_t channel = 0; channel < scope.size(); ++channel)
+                scope[channel][(size_t) index].store(scopeValues[channel], std::memory_order_relaxed);
+            scopeWrite.store((index + 1) % static_cast<int>(scope[0].size()), std::memory_order_release);
         }
     }
     const auto nextLatency = juce::jmax(engine.getActiveLength(0), engine.getActiveLength(1));
@@ -393,10 +416,11 @@ void ReverseLabAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, ju
         queueLatencyUpdate(nextLatency);
 }
 
-float ReverseLabAudioProcessor::getScopeSample(int index) const noexcept
+float ReverseLabAudioProcessor::getScopeSample(int channel, int index) const noexcept
 {
-    index = juce::jlimit(0, static_cast<int>(scope.size()) - 1, index);
-    return scope[(size_t) index].load(std::memory_order_relaxed);
+    channel = juce::jlimit(0, static_cast<int>(scope.size()) - 1, channel);
+    index = juce::jlimit(0, static_cast<int>(scope[0].size()) - 1, index);
+    return scope[(size_t) channel][(size_t) index].load(std::memory_order_relaxed);
 }
 
 juce::AudioProcessorEditor* ReverseLabAudioProcessor::createEditor()
@@ -408,7 +432,7 @@ const juce::String ReverseLabAudioProcessor::getProgramName(int index)
 {
     static const juce::StringArray names { "Clean Reverse", "Stereo Drift", "Frozen Texture",
                                            "Feedback Rise", "Chopped Eighths", "Wide Triplets" };
-    return names[juce::jlimit(0, names.size() - 1, index)];
+    return juce::isPositiveAndBelow(index, names.size()) ? names[index] : juce::String {};
 }
 
 void ReverseLabAudioProcessor::setPlainParameter(const char* id, float plainValue)
@@ -447,8 +471,7 @@ void ReverseLabAudioProcessor::applyPendingProgramChange()
     {
         case 1: setPlainParameter(rl::params::link, 0.0f); setPlainParameter(rl::params::rightSize, 9.0f);
                 setPlainParameter(rl::params::stereoOffset, 35.0f); setPlainParameter(rl::params::random, 18.0f); break;
-        case 2: setPlainParameter(rl::params::freeze, 1.0f); setPlainParameter(rl::params::feedback, 35.0f);
-                setPlainParameter(rl::params::lowpass, 6800.0f); break;
+        case 2: setPlainParameter(rl::params::freeze, 1.0f); setPlainParameter(rl::params::lowpass, 6800.0f); break;
         case 3: setPlainParameter(rl::params::feedback, 72.0f); setPlainParameter(rl::params::mix, 76.0f);
                 setPlainParameter(rl::params::highpass, 110.0f); break;
         case 4: setPlainParameter(rl::params::leftSize, 5.0f); setPlainParameter(rl::params::rightSize, 5.0f);
@@ -473,7 +496,7 @@ void ReverseLabAudioProcessor::setStateInformation(const void* data, int size)
     if (auto xml = getXmlFromBinary(data, size))
     {
         auto state = juce::ValueTree::fromXml(*xml);
-        if (state.isValid())
+        if (state.isValid() && state.hasType(parameters.state.getType()))
         {
             const auto restoredProgram = juce::jlimit(0, getNumPrograms() - 1,
                                                       static_cast<int>(state.getProperty("program", 0)));

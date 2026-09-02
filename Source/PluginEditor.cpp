@@ -140,11 +140,12 @@ void ScopeComponent::paint(juce::Graphics& g)
     for (int x = 0; x < static_cast<int>(plot.getWidth()); ++x)
     {
         const auto index = (write + x * 256 / juce::jmax(1, static_cast<int>(plot.getWidth()))) % 256;
-        const auto value = juce::jlimit(-1.0f, 1.0f, processor.getScopeSample(index));
+        const auto leftValue = juce::jlimit(-1.0f, 1.0f, processor.getScopeSample(0, index));
+        const auto rightValue = juce::jlimit(-1.0f, 1.0f, processor.getScopeSample(1, index));
         const auto px = plot.getX() + static_cast<float>(x);
         const auto amplitude = plot.getHeight() * 0.18f;
-        const auto leftY = centre - plot.getHeight() * 0.23f - value * amplitude;
-        const auto rightY = centre + plot.getHeight() * 0.23f + value * amplitude;
+        const auto leftY = centre - plot.getHeight() * 0.23f - leftValue * amplitude;
+        const auto rightY = centre + plot.getHeight() * 0.23f - rightValue * amplitude;
         if (x == 0) { leftWave.startNewSubPath(px, leftY); rightWave.startNewSubPath(px, rightY); }
         else { leftWave.lineTo(px, leftY); rightWave.lineTo(px, rightY); }
     }

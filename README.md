@@ -1,4 +1,4 @@
-# ReverseLab 1.0.2
+# ReverseLab 1.0.3
 
 ReverseLab is a tempo-synchronised stereo reverse effect for Cubase on macOS.
 
@@ -16,7 +16,7 @@ The VST3 inside the current release is ad-hoc signed, but the `.pkg` itself is u
 git clone --recurse-submodules https://github.com/TheWhykiki/ReverseLab.git
 cd ReverseLab
 cmake -S . -B build -G Xcode -DCMAKE_BUILD_TYPE=Release
-cmake --build build --config Release --target ReverseLab ReverseLabTests
+cmake --build build --config Release --target ReverseLab_VST3 ReverseLabTests
 ctest --test-dir build -C Release --output-on-failure
 ```
 
@@ -26,7 +26,7 @@ The project builds a universal `arm64`/`x86_64` VST3. Install it only after test
 ./scripts/install-local.sh Release
 ```
 
-`./scripts/package-release.sh Release` creates the `.pkg`, VST3 ZIP, and checksums. For a Developer-ID-signed and notarized package, set `REVERSELAB_APPLICATION_IDENTITY`, `REVERSELAB_INSTALLER_IDENTITY`, and `REVERSELAB_NOTARY_PROFILE` to the corresponding signing identities and `notarytool` keychain profile before running it.
+`./scripts/package-release.sh Release` creates the `.pkg`, VST3 ZIP, and checksums and refuses to package a stale bundle whose embedded version differs from `CMakeLists.txt`. For a Developer-ID-signed and notarized package, set `REVERSELAB_APPLICATION_IDENTITY`, `REVERSELAB_INSTALLER_IDENTITY`, and `REVERSELAB_NOTARY_PROFILE` to the corresponding signing identities and `notarytool` keychain profile before running it.
 
 The currently verified local installation uses the user-level VST3 directory, which Cubase scans without administrator privileges:
 
@@ -56,4 +56,4 @@ Every push and pull request builds the universal VST3 and runs the DSP/processor
 - Embedded VST3 ad-hoc signed; public `.pkg` unsigned and not yet Apple-notarized
 - Cubase 15 `vstscanner` exit code 0
 - REAPER 7.79 native-arm64 host test: VST3 instantiated, 26 parameters exposed, project state saved, 4 s offline render completed at 44.1 kHz/24-bit stereo with no clipped samples
-- Automated DSP and processor tests pass at 44.1/48/88.2/96/192 kHz, variable block sizes, continuous free timing, latency-aligned bypass, state restoration, reset invalidation, 0.25×/1×/4× speed, feedback stability, Freeze/Unfreeze recovery, superseded latency requests, and deterministic randomisation
+- Automated DSP and processor tests pass at 44.1/48/88.2/96/192 kHz, variable block sizes, continuous free timing, latency-aligned bypass, validated state restoration, resource release/re-prepare, independent stereo scope output, reset invalidation, 0.25×/1×/4× speed, feedback stability, Freeze/Unfreeze recovery, superseded latency requests, and deterministic randomisation

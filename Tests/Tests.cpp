@@ -1,6 +1,7 @@
 #include <juce_core/juce_core.h>
 #include "PluginProcessor.h"
 #include "ReverseEngine.h"
+#include <algorithm>
 #include <cmath>
 
 namespace
@@ -333,6 +334,15 @@ public:
                                   72.0f, 0.001f);
         expectWithinAbsoluteError(presetProcessor.parameters.getRawParameterValue(rl::params::bypass)->load(),
                                   0.0f, 0.001f);
+        presetProcessor.setCurrentProgram(2);
+        presetProcessor.servicePendingHostUpdatesForTesting();
+        expectWithinAbsoluteError(presetProcessor.parameters.getRawParameterValue(rl::params::freeze)->load(),
+                                  1.0f, 0.001f);
+        expectWithinAbsoluteError(presetProcessor.parameters.getRawParameterValue(rl::params::feedback)->load(),
+                                  0.0f, 0.001f,
+                                  "Frozen Texture must not advertise inaudible feedback");
+        expect(presetProcessor.getProgramName(-1).isEmpty());
+        expect(presetProcessor.getProgramName(presetProcessor.getNumPrograms()).isEmpty());
 
         beginTest("Internal bypass returns the latency-aligned dry signal");
         setParameter(processor, rl::params::bypass, 1.0f);
@@ -368,6 +378,29 @@ public:
         expectEquals(restored.getLastEditorSize().x, 1234);
         expectEquals(restored.getLastEditorSize().y, 777);
         expectEquals(restored.getLatencySamples(), 6600);
+
+        beginTest("State restore rejects a valid XML tree belonging to another processor");
+        {
+            auto foreignState = state;
+            auto* first = static_cast<char*>(foreignState.getData());
+            auto* last = first + foreignState.getSize();
+            constexpr char expectedType[] = "ReverseLabState";
+            constexpr char foreignType[] = "InvalidLabState";
+            static_assert(sizeof(expectedType) == sizeof(foreignType));
+            auto* typePosition = std::search(first, last, std::begin(expectedType), std::end(expectedType) - 1);
+            expect(typePosition != last, "Serialized state must contain its root type");
+            if (typePosition != last)
+                std::copy(std::begin(foreignType), std::end(foreignType) - 1, typePosition);
+
+            ReverseLabAudioProcessor stateTarget;
+            setParameter(stateTarget, rl::params::rightFreeMs, 321.0f);
+            stateTarget.setLastEditorSize(1000, 700);
+            stateTarget.setStateInformation(foreignState.getData(), static_cast<int>(foreignState.getSize()));
+            expectWithinAbsoluteError(stateTarget.parameters.getRawParameterValue(rl::params::rightFreeMs)->load(),
+                                      321.0f, 0.01f);
+            expectEquals(stateTarget.getLastEditorSize().x, 1000);
+            expectEquals(stateTarget.getLastEditorSize().y, 700);
+        }
 
         beginTest("Variable block sizes and mono processing stay finite");
         ReverseLabAudioProcessor mono;
@@ -458,6 +491,11 @@ public:
         }
         expect(leftEnergy > 1.0 && rightEnergy > 1.0);
         expect(differenceEnergy > 100.0, "Unlinked L/R segment times must not collapse to mono");
+        double scopeDifference = 0.0;
+        for (int index = 0; index < 256; ++index)
+            scopeDifference += std::abs(stereoSplit.getScopeSample(0, index)
+                                        - stereoSplit.getScopeSample(1, index));
+        expect(scopeDifference > 1.0, "The scope must display the actual independent L/R output");
 
         beginTest("Randomisation does not modulate host latency");
         ReverseLabAudioProcessor randomLatency;
@@ -573,6 +611,30 @@ public:
             unprepared2.processBlock(raw, midi);
             expectWithinAbsoluteError(raw.getSample(0, 10), 0.25f, 0.0001f);
             expectWithinAbsoluteError(raw.getSample(1, 10), -0.25f, 0.0001f);
+        }
+
+        beginTest("releaseResources frees history and permits a clean re-prepare");
+        {
+            ReverseLabAudioProcessor releasable;
+            releasable.prepareToPlay(192000.0, 2048);
+            expect(releasable.getAllocatedHistoryBytesForTesting() > 80u * 1024u * 1024u);
+            releasable.releaseResources();
+            expect(releasable.getAllocatedHistoryBytesForTesting() == 0u);
+            expectEquals(releasable.getScopeWriteIndex(), 0);
+            expectWithinAbsoluteError(releasable.getScopeSample(0, 0), 0.0f, 0.0001f);
+            expectWithinAbsoluteError(releasable.getScopeSample(1, 0), 0.0f, 0.0001f);
+
+            juce::AudioBuffer<float> releasedBlock(2, 64);
+            for (int i = 0; i < 64; ++i)
+            {
+                releasedBlock.setSample(0, i, 0.25f);
+                releasedBlock.setSample(1, i, -0.25f);
+            }
+            releasable.processBlock(releasedBlock, midi);
+            expectWithinAbsoluteError(releasedBlock.getSample(0, 10), 0.25f, 0.0001f);
+            expectWithinAbsoluteError(releasedBlock.getSample(1, 10), -0.25f, 0.0001f);
+            releasable.prepareToPlay(48000.0, 64);
+            expect(releasable.getAllocatedHistoryBytesForTesting() > 20u * 1024u * 1024u);
         }
 
         beginTest("prepareToPlay reports latency from the host tempo when available");

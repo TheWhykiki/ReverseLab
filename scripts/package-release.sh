@@ -25,6 +25,14 @@ if [[ ! -d "$plugin" ]]; then
     exit 1
 fi
 
+bundle_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' \
+    "$plugin/Contents/Info.plist")"
+if [[ "$bundle_version" != "$version" ]]; then
+    echo "Version mismatch: requested $version, but the built VST3 is $bundle_version." >&2
+    echo "Reconfigure and rebuild ReverseLab_VST3 before packaging." >&2
+    exit 1
+fi
+
 rm -rf "$dist"
 mkdir -p "$dist" "$stage/Library/Audio/Plug-Ins/VST3"
 ditto "$plugin" "$stage/Library/Audio/Plug-Ins/VST3/ReverseLab.vst3"

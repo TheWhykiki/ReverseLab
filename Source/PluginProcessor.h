@@ -11,7 +11,7 @@ public:
     ~ReverseLabAudioProcessor() override;
 
     void prepareToPlay(double sampleRate, int samplesPerBlock) override;
-    void releaseResources() override {}
+    void releaseResources() override;
     bool isBusesLayoutSupported(const BusesLayout&) const override;
     void processBlock(juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
     juce::AudioProcessorEditor* createEditor() override;
@@ -38,7 +38,7 @@ public:
 
     juce::AudioProcessorValueTreeState parameters;
     [[nodiscard]] int getCurrentLatencySamples() const noexcept { return displayedLatency.load(); }
-    [[nodiscard]] float getScopeSample(int index) const noexcept;
+    [[nodiscard]] float getScopeSample(int channel, int index) const noexcept;
     [[nodiscard]] int getScopeWriteIndex() const noexcept { return scopeWrite.load(); }
     [[nodiscard]] float getEnginePhase(int channel) const noexcept { return engine.getNormalizedPhase(channel); }
     [[nodiscard]] juce::Point<int> getLastEditorSize() const noexcept
@@ -53,6 +53,14 @@ public:
     }
 #if REVERSELAB_UNIT_TESTS
     void servicePendingHostUpdatesForTesting() { timerCallback(); }
+    [[nodiscard]] size_t getAllocatedHistoryBytesForTesting() const noexcept
+    {
+        return engine.getAllocatedStorageBytes()
+               + static_cast<size_t>(dryDelay.getNumChannels()) * static_cast<size_t>(dryDelay.getNumSamples())
+                     * sizeof(float)
+               + static_cast<size_t>(wetAlignmentDelay.getNumChannels())
+                     * static_cast<size_t>(wetAlignmentDelay.getNumSamples()) * sizeof(float);
+    }
 #endif
 
 private:
@@ -74,7 +82,7 @@ private:
     juce::AudioBuffer<float> wetAlignmentDelay;
     std::array<OnePoleState, 2> filterState;
     std::array<WetTap, 2> wetTaps;
-    std::array<std::atomic<float>, 256> scope {};
+    std::array<std::array<std::atomic<float>, 256>, 2> scope {};
     std::atomic<int> scopeWrite { 0 };
     std::atomic<int> displayedLatency { 0 };
     std::atomic<int> pendingLatency { 0 };

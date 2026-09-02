@@ -47,6 +47,13 @@
 42. **Editor-size data race** — the message/state paths could read and write plain `int` dimensions concurrently. Width and height are now atomics and state serialization uses explicit relaxed loads/stores.
 43. **Misreported installer signature** — documentation called the release package ad-hoc signed even though only its embedded VST3 was ad-hoc signed. The package is now accurately identified as unsigned, and the packaging script supports Developer ID application/installer identities plus `notarytool` submission and stapling when credentials are supplied.
 44. **Duplicated JUCE linkage in test executables** — the test and A/B targets no longer link the plug-in shared-code target and another copy of the JUCE modules into one executable. They compile the product sources with their own console-app configuration, removing the standalone-definition collision and redundant link payload.
+45. **Inactive instances retained their full history allocation** — `releaseResources()` was empty, so a stopped 192 kHz instance kept roughly 82 MiB of core history. It now releases all engine, dry, and wet buffers; audio remains safe if a host calls `processBlock()` while released, and a subsequent `prepareToPlay()` rebuilds clean state.
+46. **Foreign state trees were accepted** — state restore previously accepted every syntactically valid JUCE `ValueTree`, even when its root belonged to another processor. Restore now requires the `ReverseLabState` root before changing parameters, program, editor dimensions, or DSP reset state.
+47. **Stereo scope collapsed to mirrored mono** — the display advertised separate L/R waveforms but the processor first averaged both output channels and drew that same value twice. The lock-free scope buffer now publishes each output channel independently; mono instances intentionally duplicate their single channel.
+48. **Invalid host program indices returned a real preset name** — out-of-range program queries were clamped to the first or last preset. They now return an empty string as required by the host-facing program contract.
+49. **Inaudible Frozen Texture feedback** — the factory preset enabled Freeze and 35% feedback together even though frozen processing performs no ring writes. The preset now reports 0% feedback instead of exposing a control value with no audible effect.
+50. **Deprecated A/B writer API** — the audio comparison utility still transferred a raw stream pointer into JUCE's deprecated positional writer overload. It now uses `AudioFormatWriterOptions` and `unique_ptr` ownership throughout, keeping the verification tool compatible with current JUCE.
+51. **Stale binary versions could be packaged silently** — the documented build command targeted JUCE's shared-code library (`ReverseLab`) rather than the actual bundle (`ReverseLab_VST3`), so a previous VST3 could survive beside newly versioned sources. The command now builds the bundle, its target receives the project version explicitly, and packaging rejects a mismatched plist version.
 
 ## Verification
 
@@ -58,11 +65,11 @@
 - Link, Freeze, and momentary Retrigger were exercised in the native preview editor.
 - REAPER reloads the freshly installed VST3 and identifies it as `ReverseLab (Whykiki Audio)`; the dedicated unlinked-stereo regression remains green after the linked-control UI fix.
 - The installed user-level VST3 passes strict code-signature verification and both binary slices declare macOS 11.0 as their minimum OS.
-- Cubase 15 `vstscanner` exits with code 0 and identifies ReverseLab 1.0.2 as a native VST3 `Fx|Delay`.
+- Cubase 15 `vstscanner` exits with code 0 and identifies ReverseLab 1.0.3 as a native VST3 `Fx|Delay` built with VST3 SDK 3.8.
 - REAPER 7.79 (native arm64) discovers and instantiates ReverseLab as VST3, exposes 26 parameters in the current build, saves/restores the plug-in in an `.rpp`, and completes a four-second offline render at 44.1 kHz/24-bit stereo without clipped samples.
 - A separate REAPER stress project creates 32 parallel ReverseLab instances, varies timing, speed, crossfade, feedback, randomisation, and stereo offset, saves all 32 VST3 states, and completes a two-second offline render without clipped samples.
 
-- The full suite (25 test groups) passes on macOS and Linux; targeted regressions cover speed automation, wet-tap transitions, maximum-length 4× history, Unfreeze recovery, superseded latency requests, and the 16-second history cap.
+- The full suite (28 test groups) passes on macOS; targeted regressions cover speed automation, wet-tap transitions, maximum-length 4× history, Unfreeze recovery, superseded latency requests, the 16-second history cap, foreign-state rejection, and resource release/re-prepare. Linux CI verification follows the pushed candidate.
 
 ## Remaining limits
 
@@ -71,5 +78,5 @@
 - Freeze audio is intentionally not serialized, matching the product contract.
 - A silent preview cannot validate the visual density of real program material; this is covered only when audio flows in Cubase.
 - Cubase still needs a short listening/automation/offline-render acceptance pass inside a real user project; its scanner and REAPER's independent native instantiation/offline-render path are green.
-- The bounded ring plus dry and wet alignment delays and the shared validity map cost about 20.5 MiB per instance at 48 kHz and 82.0 MiB at 192 kHz. Thirty-two instances therefore use about 0.64 GiB or 2.56 GiB respectively for core history. The 16-second cap affects `2 Bars` below 30 BPM in 4/4 and correspondingly long unusual meters.
-- Feedback is taken from the engine output before the high-/low-pass stage, so the filters shape only the output and not the repeats. "Frozen Texture" combines Freeze with a feedback amount that has no effect while frozen.
+- While active, the bounded ring plus dry and wet alignment delays and the shared validity map cost about 20.5 MiB per instance at 48 kHz and 82.0 MiB at 192 kHz. Thirty-two active instances therefore use about 0.64 GiB or 2.56 GiB respectively for core history; stopped/released instances now free that allocation. The 16-second cap affects `2 Bars` below 30 BPM in 4/4 and correspondingly long unusual meters.
+- Feedback is taken from the engine output before the high-/low-pass stage, so the filters shape only the output and not the repeats.

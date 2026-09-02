@@ -14,11 +14,14 @@ void setParameter(ReverseLabAudioProcessor& processor, const char* id, float pla
 bool writeWave(const juce::File& file, const juce::AudioBuffer<float>& audio, double sampleRate)
 {
     file.deleteFile();
-    auto stream = std::unique_ptr<juce::FileOutputStream>(file.createOutputStream());
+    std::unique_ptr<juce::OutputStream> stream = file.createOutputStream();
     if (stream == nullptr) return false;
     juce::WavAudioFormat format;
-    auto writer = std::unique_ptr<juce::AudioFormatWriter>(
-        format.createWriterFor(stream.release(), sampleRate, 2, 24, {}, 0));
+    const auto options = juce::AudioFormatWriterOptions {}
+                             .withSampleRate(sampleRate)
+                             .withChannelLayout(juce::AudioChannelSet::stereo())
+                             .withBitsPerSample(24);
+    auto writer = format.createWriterFor(stream, options);
     return writer != nullptr && writer->writeFromAudioSampleBuffer(audio, 0, audio.getNumSamples());
 }
 }

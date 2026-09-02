@@ -281,8 +281,13 @@ void ReverseLabAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, ju
         > static_cast<long double>(juce::jmax<int64_t>(64, buffer.getNumSamples() * 2));
     if ((playing && !wasPlaying) || transportJump)
     {
-        engine.reset();
-        engine.setSeed(appliedSeed);
+        // A frozen texture must survive stop/start and loop cycling: resetting the engine here
+        // would discard the capture and the pre-roll would freeze whatever plays next instead.
+        if (!engine.isHoldingFrozenCapture())
+        {
+            engine.reset();
+            engine.setSeed(appliedSeed);
+        }
         invalidateDelayLines();
         filterState = {};
     }

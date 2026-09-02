@@ -19,6 +19,7 @@ void ReverseEngine::release()
     ring.setSize(0, 0, false, false, false);
     std::vector<uint32_t>().swap(generations);
     capacity = 1;
+    capturedFrames = 0;
     writePosition = 0;
     generation = 1;
     wroteCurrentPosition = false;
@@ -37,6 +38,7 @@ void ReverseEngine::reset() noexcept
         generation = 1;
     }
     writePosition = 0;
+    capturedFrames = 0;
     wroteCurrentPosition = false;
     for (size_t channel = 0; channel < heads.size(); ++channel)
     {
@@ -153,6 +155,12 @@ float ReverseEngine::processSample(int channel, float input, const EngineSetting
     channel = juce::jlimit(0, 1, channel);
     auto& head = heads[(size_t) channel];
     const int requested = channel == 0 ? settings.leftLength : settings.rightLength;
+    // A restored/factory Freeze can arrive before this instance has captured any audio. Honour
+    // Freeze only after a complete segment for both channels exists; otherwise a freshly loaded
+    // 100%-wet instance would remain silent forever because Freeze also prevents all writes.
+    const auto requiredCapture = juce::jlimit(16, capacity - 8,
+                                              juce::jmax(settings.leftLength, settings.rightLength));
+    const bool freezeActive = settings.freeze && capturedFrames >= requiredCapture;
     const bool triggerEdge = settings.retrigger && !head.lastRetrigger;
     head.lastRetrigger = settings.retrigger;
     if (head.activeLength <= 1 || triggerEdge)
@@ -180,7 +188,7 @@ float ReverseEngine::processSample(int channel, float input, const EngineSetting
     // from phase * speed, so speed automation changes the read velocity, not the read position.
     // Rebase the overwrite distance when leaving Freeze. No samples were replaced while frozen,
     // even though both the logical writer and the reverse reader continued moving.
-    if (head.wasFrozen && !settings.freeze)
+    if (head.wasFrozen && !freezeActive)
     {
         if (!head.readExhausted)
             head.historyRemaining = distanceFromWriter(static_cast<float>(head.segmentEnd)
@@ -189,12 +197,12 @@ float ReverseEngine::processSample(int channel, float input, const EngineSetting
             head.nextHistoryRemaining = distanceFromWriter(static_cast<float>(head.nextEnd)
                                                             - head.nextOffset);
     }
-    head.wasFrozen = settings.freeze;
+    head.wasFrozen = freezeActive;
 
     // At high speeds, hold the final valid sample once writer and reader meet instead of wrapping
     // around into material written during the current segment.
     auto wet = readCaptured(channel, head.segmentEnd, head.readOffset, settings.speed,
-                            !settings.freeze, head.historyRemaining, head.lastRead,
+                            !freezeActive, head.historyRemaining, head.lastRead,
                             head.readExhausted);
 
     const auto fadeSamples = juce::jlimit(1.0f, head.activeLength * 0.25f,
@@ -210,7 +218,7 @@ float ReverseEngine::processSample(int channel, float input, const EngineSetting
         }
         const auto transition = juce::jlimit(0.0f, 1.0f, head.transitionPhase / fadeSamples);
         const auto nextWet = readCaptured(channel, head.nextEnd, head.nextOffset, settings.speed,
-                                          !settings.freeze, head.nextHistoryRemaining,
+                                          !freezeActive, head.nextHistoryRemaining,
                                           head.nextLastRead, head.nextReadExhausted);
         wet = wet * std::cos(transition * juce::MathConstants<float>::halfPi)
               + nextWet * std::sin(transition * juce::MathConstants<float>::halfPi);
@@ -229,7 +237,7 @@ float ReverseEngine::processSample(int channel, float input, const EngineSetting
     else
         head.antiAliasState = wet;
 
-    if (!settings.freeze)
+    if (!freezeActive)
     {
         const auto write = juce::jlimit(-4.0f, 4.0f, input + wet * settings.feedback);
         ring.setSample(channel, writePosition, std::isfinite(write) ? write : 0.0f);
@@ -247,7 +255,10 @@ float ReverseEngine::processSample(int channel, float input, const EngineSetting
 void ReverseEngine::advance() noexcept
 {
     if (wroteCurrentPosition)
+    {
         generations[(size_t) writePosition] = generation;
+        capturedFrames = juce::jmin(capacity, capturedFrames + 1);
+    }
     wroteCurrentPosition = false;
     writePosition = (writePosition + 1) % capacity;
 }

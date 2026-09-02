@@ -3,6 +3,7 @@
 #include "ReverseEngine.h"
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace
 {
@@ -92,6 +93,26 @@ public:
             engine.advance();
         }
         expect(energy > 1.0f);
+
+        beginTest("Freeze requested before capture pre-rolls instead of latching silence");
+        {
+            rl::ReverseEngine frozenFromStart;
+            frozenFromStart.prepare(48000.0, 4096);
+            rl::EngineSettings s;
+            s.leftLength = s.rightLength = 64;
+            s.freeze = true;
+            float frozenFromStartEnergy = 0.0f;
+            for (int i = 0; i < 256; ++i)
+            {
+                const auto input = 0.4f * std::sin(static_cast<float>(i) * 0.17f);
+                const auto frozenOutput = frozenFromStart.processSample(0, input, s);
+                (void) frozenFromStart.processSample(1, input, s);
+                if (i >= 96) frozenFromStartEnergy += std::abs(frozenOutput);
+                frozenFromStart.advance();
+            }
+            expect(frozenFromStartEnergy > 1.0f,
+                   "A fresh frozen engine must capture one complete segment before holding it");
+        }
 
         beginTest("Seeded randomisation is deterministic");
         auto render = [](uint32_t seed)
@@ -379,6 +400,42 @@ public:
         expectEquals(restored.getLastEditorSize().y, 777);
         expectEquals(restored.getLatencySamples(), 6600);
 
+        beginTest("A restored Freeze state captures fresh material instead of remaining silent");
+        {
+            ReverseLabAudioProcessor frozenSource;
+            setParameter(frozenSource, rl::params::sync, 0.0f);
+            setParameter(frozenSource, rl::params::link, 1.0f);
+            setParameter(frozenSource, rl::params::leftFreeMs, 20.0f);
+            setParameter(frozenSource, rl::params::mix, 100.0f);
+            setParameter(frozenSource, rl::params::freeze, 1.0f);
+            juce::MemoryBlock frozenState;
+            frozenSource.getStateInformation(frozenState);
+
+            ReverseLabAudioProcessor frozenRestored;
+            frozenRestored.setStateInformation(frozenState.getData(), static_cast<int>(frozenState.getSize()));
+            frozenRestored.prepareToPlay(48000.0, 64);
+            juce::AudioBuffer<float> frozenBlock(2, 64);
+            juce::MidiBuffer frozenMidi;
+            double frozenEnergy = 0.0;
+            int absolute = 0;
+            for (int blockIndex = 0; blockIndex < 80; ++blockIndex)
+            {
+                for (int sample = 0; sample < frozenBlock.getNumSamples(); ++sample)
+                {
+                    const auto input = 0.4f * std::sin(static_cast<float>(absolute + sample) * 0.071f);
+                    frozenBlock.setSample(0, sample, input);
+                    frozenBlock.setSample(1, sample, input);
+                }
+                frozenRestored.processBlock(frozenBlock, frozenMidi);
+                if (blockIndex >= 32)
+                    for (int sample = 0; sample < frozenBlock.getNumSamples(); ++sample)
+                        frozenEnergy += std::abs(frozenBlock.getSample(0, sample));
+                absolute += frozenBlock.getNumSamples();
+            }
+            expect(frozenEnergy > 10.0,
+                   "Restoring Freeze without serialized audio must not latch a 100%-wet instance at zero");
+        }
+
         beginTest("State restore rejects a valid XML tree belonging to another processor");
         {
             auto foreignState = state;
@@ -417,6 +474,26 @@ public:
             mono.processBlock(monoBlock, midi);
             for (int i = 0; i < blockSize; ++i)
                 expect(std::isfinite(monoBlock.getSample(0, i)));
+        }
+
+        beginTest("Extreme and non-finite host positions cannot overflow transport handling");
+        {
+            ReverseLabAudioProcessor hostileTransport;
+            TestPlayHead hostilePlayHead;
+            hostilePlayHead.position.setIsPlaying(true);
+            hostilePlayHead.position.setBpm(120.0);
+            hostilePlayHead.position.setPpqPosition(std::numeric_limits<double>::quiet_NaN());
+            hostilePlayHead.position.setTimeInSamples(std::numeric_limits<int64_t>::max());
+            hostileTransport.setPlayHead(&hostilePlayHead);
+            hostileTransport.prepareToPlay(48000.0, 64);
+            juce::AudioBuffer<float> hostileBlock(2, 64);
+            hostileBlock.clear();
+            hostileTransport.processBlock(hostileBlock, midi);
+            hostilePlayHead.position.setTimeInSamples(std::numeric_limits<int64_t>::min());
+            hostileTransport.processBlock(hostileBlock, midi);
+            for (int sample = 0; sample < hostileBlock.getNumSamples(); ++sample)
+                expect(std::isfinite(hostileBlock.getSample(0, sample)));
+            hostileTransport.setPlayHead(nullptr);
         }
 
 
@@ -601,6 +678,46 @@ public:
                 expectLessThan(detector.maxDelta, ClickDetector::threshold(amplitude, w, 1.0f),
                                "Segment shortening must crossfade the wet alignment tap");
             }
+        }
+
+        beginTest("Filter Off automation crossfades instead of switching topology");
+        {
+            ReverseLabAudioProcessor filterAutomation;
+            setParameter(filterAutomation, rl::params::sync, 0.0f);
+            setParameter(filterAutomation, rl::params::link, 1.0f);
+            setParameter(filterAutomation, rl::params::leftFreeMs, 20.0f);
+            setParameter(filterAutomation, rl::params::mix, 100.0f);
+            setParameter(filterAutomation, rl::params::feedback, 0.0f);
+            setParameter(filterAutomation, rl::params::crossfade, 25.0f);
+            setParameter(filterAutomation, rl::params::highpass, 1000.0f);
+            setParameter(filterAutomation, rl::params::lowpass, 20000.0f);
+            filterAutomation.prepareToPlay(48000.0, 64);
+            juce::AudioBuffer<float> filterBlock(2, 64);
+            juce::MidiBuffer filterMidi;
+            for (int blockIndex = 0; blockIndex < 100; ++blockIndex)
+            {
+                for (int sample = 0; sample < filterBlock.getNumSamples(); ++sample)
+                    for (int channel = 0; channel < 2; ++channel)
+                        filterBlock.setSample(channel, sample, 0.5f);
+                filterAutomation.processBlock(filterBlock, filterMidi);
+            }
+
+            ClickDetector filterDetector;
+            filterDetector.previous = filterBlock.getSample(0, filterBlock.getNumSamples() - 1);
+            setParameter(filterAutomation, rl::params::highpass, 20.0f);
+            for (int blockIndex = 0; blockIndex < 48; ++blockIndex)
+            {
+                for (int sample = 0; sample < filterBlock.getNumSamples(); ++sample)
+                    for (int channel = 0; channel < 2; ++channel)
+                        filterBlock.setSample(channel, sample, 0.5f);
+                filterAutomation.processBlock(filterBlock, filterMidi);
+                for (int sample = 0; sample < filterBlock.getNumSamples(); ++sample)
+                    filterDetector.push(filterBlock.getSample(0, sample));
+            }
+            expectLessThan(filterDetector.maxDelta, 0.02f,
+                           "Moving High-pass to Off must not jump from filtered to dry in one sample");
+            expect(filterBlock.getSample(0, filterBlock.getNumSamples() - 1) > 0.45f,
+                   "High-pass Off must finish at the unfiltered signal");
         }
 
         beginTest("processBlock before prepareToPlay passes audio through unharmed");

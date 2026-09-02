@@ -54,6 +54,10 @@
 49. **Inaudible Frozen Texture feedback** — the factory preset enabled Freeze and 35% feedback together even though frozen processing performs no ring writes. The preset now reports 0% feedback instead of exposing a control value with no audible effect.
 50. **Deprecated A/B writer API** — the audio comparison utility still transferred a raw stream pointer into JUCE's deprecated positional writer overload. It now uses `AudioFormatWriterOptions` and `unique_ptr` ownership throughout, keeping the verification tool compatible with current JUCE.
 51. **Stale binary versions could be packaged silently** — the documented build command targeted JUCE's shared-code library (`ReverseLab`) rather than the actual bundle (`ReverseLab_VST3`), so a previous VST3 could survive beside newly versioned sources. The command now builds the bundle, its target receives the project version explicitly, and packaging rejects a mismatched plist version.
+52. **Playhead time-of-check/time-of-use crash** — `processBlock()` previously loaded JUCE's atomic playhead pointer once for a null check and again for dereferencing. A concurrent host detach between those loads could dereference null. The pointer is now loaded exactly once per block.
+53. **Restored Freeze could latch silence forever** — a state restore invalidates the non-serialized history while preserving `Freeze = true`, which previously prevented the empty engine from ever capturing replacement audio. Freeze now performs a deterministic one-segment pre-roll after every empty/reset state, then holds the newly captured material.
+54. **Hard filter endpoint switching** — reaching the displayed `Off` endpoint abruptly bypassed the high-/low-pass topology after cutoff smoothing, allowing a full-scale discontinuity. Separate 50 ms enable ramps now crossfade the filtered and direct paths while keeping filter state warm only during a transition.
+55. **Host-position overflow and NaN handling** — transport-jump subtraction could overflow signed 64-bit sample positions, and a non-finite PPQ value could reach integer conversion in Retrigger scheduling. Jump detection now uses `long double` differences and non-finite PPQ positions are ignored.
 
 ## Verification
 
@@ -65,17 +69,17 @@
 - Link, Freeze, and momentary Retrigger were exercised in the native preview editor.
 - REAPER reloads the freshly installed VST3 and identifies it as `ReverseLab (Whykiki Audio)`; the dedicated unlinked-stereo regression remains green after the linked-control UI fix.
 - The installed user-level VST3 passes strict code-signature verification and both binary slices declare macOS 11.0 as their minimum OS.
-- Cubase 15 `vstscanner` exits with code 0 and identifies ReverseLab 1.0.3 as a native VST3 `Fx|Delay` built with VST3 SDK 3.8.
+- Cubase 15 `vstscanner` exits with code 0 and identifies ReverseLab 1.0.4 as a native VST3 `Fx|Delay` built with VST3 SDK 3.8.
 - REAPER 7.79 (native arm64) discovers and instantiates ReverseLab as VST3, exposes 26 parameters in the current build, saves/restores the plug-in in an `.rpp`, and completes a four-second offline render at 44.1 kHz/24-bit stereo without clipped samples.
 - A separate REAPER stress project creates 32 parallel ReverseLab instances, varies timing, speed, crossfade, feedback, randomisation, and stereo offset, saves all 32 VST3 states, and completes a two-second offline render without clipped samples.
 
-- The full suite (28 test groups) passes on macOS; targeted regressions cover speed automation, wet-tap transitions, maximum-length 4× history, Unfreeze recovery, superseded latency requests, the 16-second history cap, foreign-state rejection, and resource release/re-prepare. Linux CI verification follows the pushed candidate.
+- The full suite (32 test groups) passes on macOS; targeted regressions cover speed and filter automation, wet-tap transitions, maximum-length 4× history, Freeze pre-roll and Unfreeze recovery, hostile transport metadata, superseded latency requests, the 16-second history cap, foreign-state rejection, and resource release/re-prepare. Linux CI verification follows the pushed candidate.
 
 ## Remaining limits
 
 - The anti-alias stage is a pragmatic real-time one-pole reconstruction filter, not a long-window polyphase resampler. It is appropriate for version 1 but extreme 4× material can still contain more aliasing than an offline-quality resampler.
 - Latency notification is asynchronous by design. The DSP keeps using the acknowledged latency until the message thread has updated the host, then crossfades its internal delay taps.
-- Freeze audio is intentionally not serialized, matching the product contract.
+- Freeze audio is intentionally not serialized. On a fresh instance or restored frozen state, ReverseLab captures one complete current segment before engaging Freeze so the plug-in cannot latch permanent silence.
 - A silent preview cannot validate the visual density of real program material; this is covered only when audio flows in Cubase.
 - Cubase still needs a short listening/automation/offline-render acceptance pass inside a real user project; its scanner and REAPER's independent native instantiation/offline-render path are green.
 - While active, the bounded ring plus dry and wet alignment delays and the shared validity map cost about 20.5 MiB per instance at 48 kHz and 82.0 MiB at 192 kHz. Thirty-two active instances therefore use about 0.64 GiB or 2.56 GiB respectively for core history; stopped/released instances now free that allocation. The 16-second cap affects `2 Bars` below 30 BPM in 4/4 and correspondingly long unusual meters.

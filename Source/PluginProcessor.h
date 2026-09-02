@@ -70,7 +70,8 @@ private:
     // acknowledged a new latency. Every offset change is crossfaded instead of switched hard.
     struct WetTap { int current = 0; int previous = 0; int transitionRemaining = 0; };
     int calculateLengthSamples(int choice, float freeMs, double bpm, double beatsPerBar, bool sync) const noexcept;
-    float processFilters(int channel, float input, float hpHz, float lpHz) noexcept;
+    float processFilters(int channel, float input, float hpHz, float lpHz,
+                         float hpAmount, float lpAmount) noexcept;
     void queueLatencyUpdate(int samples) noexcept;
     void timerCallback() override;
     void invalidateDelayLines() noexcept;
@@ -96,7 +97,8 @@ private:
     std::atomic<int> pendingProgram { 0 };
     juce::SmoothedValue<float> smoothedMix, smoothedOutput, smoothedBypass, smoothedSpeed,
                                smoothedCrossfade, smoothedFeedback, smoothedHighpass,
-                               smoothedLowpass, smoothedOffset, smoothedRandom;
+                               smoothedLowpass, smoothedHighpassEnabled, smoothedLowpassEnabled,
+                               smoothedOffset, smoothedRandom;
     int dryWrite = 0, wetWrite = 0;
     int validDelaySamples = 0;
     int maximumDelay = 1;

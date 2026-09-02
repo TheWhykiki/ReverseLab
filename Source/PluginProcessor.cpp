@@ -53,6 +53,8 @@ void ReverseLabAudioProcessor::prepareToPlay(double sampleRate, int)
     smoothedFeedback.reset(sampleRate, 0.025);
     smoothedHighpass.reset(sampleRate, 0.025);
     smoothedLowpass.reset(sampleRate, 0.025);
+    smoothedHighpassEnabled.reset(sampleRate, 0.050);
+    smoothedLowpassEnabled.reset(sampleRate, 0.050);
     smoothedOffset.reset(sampleRate, 0.025);
     smoothedRandom.reset(sampleRate, 0.025);
     smoothedMix.setCurrentAndTargetValue(parameters.getRawParameterValue(rl::params::mix)->load() * 0.01f);
@@ -63,6 +65,10 @@ void ReverseLabAudioProcessor::prepareToPlay(double sampleRate, int)
     smoothedFeedback.setCurrentAndTargetValue(parameters.getRawParameterValue(rl::params::feedback)->load() * 0.01f);
     smoothedHighpass.setCurrentAndTargetValue(parameters.getRawParameterValue(rl::params::highpass)->load());
     smoothedLowpass.setCurrentAndTargetValue(parameters.getRawParameterValue(rl::params::lowpass)->load());
+    smoothedHighpassEnabled.setCurrentAndTargetValue(
+        parameters.getRawParameterValue(rl::params::highpass)->load() > 20.01f ? 1.0f : 0.0f);
+    smoothedLowpassEnabled.setCurrentAndTargetValue(
+        parameters.getRawParameterValue(rl::params::lowpass)->load() < 19999.0f ? 1.0f : 0.0f);
     smoothedOffset.setCurrentAndTargetValue(parameters.getRawParameterValue(rl::params::stereoOffset)->load() * 0.01f);
     smoothedRandom.setCurrentAndTargetValue(parameters.getRawParameterValue(rl::params::random)->load() * 0.01f);
     // Use the host tempo and meter when they are already known so the latency reported from
@@ -189,30 +195,31 @@ void ReverseLabAudioProcessor::invalidateDelayLines() noexcept
     validDelaySamples = 0;
 }
 
-float ReverseLabAudioProcessor::processFilters(int channel, float input, float hpHz, float lpHz) noexcept
+float ReverseLabAudioProcessor::processFilters(int channel, float input, float hpHz, float lpHz,
+                                               float hpAmount, float lpAmount) noexcept
 {
     auto& state = filterState[(size_t) channel];
-    auto value = input;
-    if (lpHz < 19999.0f)
+    const auto rate = static_cast<float>(juce::jmax(1.0, currentSampleRate));
+    lpAmount = juce::jlimit(0.0f, 1.0f, lpAmount);
+    if (lpAmount > 0.0f)
     {
-        const auto lpA = 1.0f - std::exp(-juce::MathConstants<float>::twoPi * lpHz
-                                         / static_cast<float>(currentSampleRate));
+        const auto lpA = 1.0f - std::exp(-juce::MathConstants<float>::twoPi * lpHz / rate);
         state.low += lpA * (input - state.low);
-        value = state.low;
     }
     else
         state.low = input;
+    auto value = input + lpAmount * (state.low - input);
 
-    if (hpHz > 20.01f)
+    hpAmount = juce::jlimit(0.0f, 1.0f, hpAmount);
+    if (hpAmount > 0.0f)
     {
-        const auto hpA = 1.0f - std::exp(-juce::MathConstants<float>::twoPi * hpHz
-                                         / static_cast<float>(currentSampleRate));
+        const auto hpA = 1.0f - std::exp(-juce::MathConstants<float>::twoPi * hpHz / rate);
         state.highLow += hpA * (value - state.highLow);
-        value -= state.highLow;
     }
     else
         state.highLow = value;
-    return value;
+    const auto highPassed = value - state.highLow;
+    return value + hpAmount * (highPassed - value);
 }
 
 void ReverseLabAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
@@ -244,17 +251,18 @@ void ReverseLabAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, ju
     std::optional<int64_t> blockPosition;
     std::optional<double> ppqPosition;
     double beatsPerBar = 4.0;
-    if (auto position = getPlayHead() != nullptr ? getPlayHead()->getPosition() : std::nullopt)
-    {
-        if (auto bpm = position->getBpm()) hostBpm = *bpm;
-        if (auto time = position->getTimeInSamples()) blockPosition = *time;
-        if (auto ppq = position->getPpqPosition()) ppqPosition = *ppq;
-        if (auto signature = position->getTimeSignature())
-            if (signature->numerator > 0 && signature->denominator > 0)
-                beatsPerBar = static_cast<double>(signature->numerator) * 4.0
-                              / static_cast<double>(signature->denominator);
-        playing = position->getIsPlaying();
-    }
+    if (auto* playHead = getPlayHead())
+        if (auto position = playHead->getPosition())
+        {
+            if (auto bpm = position->getBpm()) hostBpm = *bpm;
+            if (auto time = position->getTimeInSamples()) blockPosition = *time;
+            if (auto ppq = position->getPpqPosition(); ppq && std::isfinite(*ppq)) ppqPosition = *ppq;
+            if (auto signature = position->getTimeSignature())
+                if (signature->numerator > 0 && signature->denominator > 0)
+                    beatsPerBar = static_cast<double>(signature->numerator) * 4.0
+                                  / static_cast<double>(signature->denominator);
+            playing = position->getIsPlaying();
+        }
     if (std::isfinite(hostBpm) && hostBpm >= 20.0 && hostBpm <= 400.0)
     {
         // ~65 ms tempo smoothing expressed in time, so the response does not depend on block size.
@@ -264,9 +272,13 @@ void ReverseLabAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, ju
     }
     publishedBpm.store(smoothedBpm, std::memory_order_relaxed);
     publishedBeatsPerBar.store(beatsPerBar, std::memory_order_relaxed);
-    const auto transportJump = playing && blockPosition && previousBlockPosition
-        && std::abs(*blockPosition - (*previousBlockPosition + buffer.getNumSamples()))
-               > juce::jmax<int64_t>(64, buffer.getNumSamples() * 2);
+    const auto transportDelta = playing && blockPosition && previousBlockPosition
+        ? std::abs(static_cast<long double>(*blockPosition)
+                   - static_cast<long double>(*previousBlockPosition)
+                   - static_cast<long double>(buffer.getNumSamples()))
+        : 0.0L;
+    const auto transportJump = transportDelta
+        > static_cast<long double>(juce::jmax<int64_t>(64, buffer.getNumSamples() * 2));
     if ((playing && !wasPlaying) || transportJump)
     {
         engine.reset();
@@ -320,6 +332,10 @@ void ReverseLabAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, ju
     smoothedFeedback.setTargetValue(parameters.getRawParameterValue(rl::params::feedback)->load() * 0.01f);
     smoothedHighpass.setTargetValue(parameters.getRawParameterValue(rl::params::highpass)->load());
     smoothedLowpass.setTargetValue(parameters.getRawParameterValue(rl::params::lowpass)->load());
+    smoothedHighpassEnabled.setTargetValue(
+        parameters.getRawParameterValue(rl::params::highpass)->load() > 20.01f ? 1.0f : 0.0f);
+    smoothedLowpassEnabled.setTargetValue(
+        parameters.getRawParameterValue(rl::params::lowpass)->load() < 19999.0f ? 1.0f : 0.0f);
     smoothedOffset.setTargetValue(parameters.getRawParameterValue(rl::params::stereoOffset)->load() * 0.01f);
     smoothedRandom.setTargetValue(parameters.getRawParameterValue(rl::params::random)->load() * 0.01f);
     const auto delayCapacity = dryDelay.getNumSamples();
@@ -345,6 +361,8 @@ void ReverseLabAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, ju
         if (retriggerCountdown >= 0) --retriggerCountdown;
         const auto hp = smoothedHighpass.getNextValue();
         const auto lp = smoothedLowpass.getNextValue();
+        const auto hpAmount = smoothedHighpassEnabled.getNextValue();
+        const auto lpAmount = smoothedLowpassEnabled.getNextValue();
         const auto monoInput = buffer.getSample(0, sample);
         std::array<float, 2> scopeValues {};
         for (int channel = 0; channel < channels; ++channel)
@@ -362,7 +380,7 @@ void ReverseLabAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, ju
                 ? readDelayTap(previousProcessingLatency) * oldTapGain + dryNew * newTapGain
                 : dryNew;
             auto wet = engine.processSample(channel, input, settings);
-            wet = processFilters(channel, wet, hp, lp);
+            wet = processFilters(channel, wet, hp, lp, hpAmount, lpAmount);
             wetAlignmentDelay.setSample(channel, wetWrite, wet);
             const auto readWetTap = [this, channel, delayCapacity](int offset) noexcept
             {

@@ -85,6 +85,7 @@ private:
     std::array<std::atomic<float>, 2> publishedPhase { 0.0f, 0.0f };
     int writePosition = 0;
     int capacity = 1;
+    int capturedFrames = 0;
     double sampleRate = 44100.0;
     uint32_t randomState = 4242;
     uint32_t generation = 1;

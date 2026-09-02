@@ -27,16 +27,16 @@ bool ReverseLabAudioProcessor::isBusesLayoutSupported(const BusesLayout& layouts
 void ReverseLabAudioProcessor::prepareToPlay(double sampleRate, int)
 {
     currentSampleRate = sampleRate;
-    maximumDelay = juce::jmax(4096, static_cast<int>(std::ceil(sampleRate * 32.0)));
+    // Sixteen seconds covers every free-time value and two bars down to 30 BPM while
+    // keeping multi-instance sessions practical at high sample rates.
+    maximumDelay = juce::jmax(4096, static_cast<int>(std::ceil(sampleRate * 16.0)) + 8);
     engine.prepare(sampleRate, maximumDelay);
     dryDelay.setSize(2, maximumDelay + 8, false, true, false);
     wetAlignmentDelay.setSize(2, maximumDelay + 8, false, true, false);
     dryDelay.clear();
     wetAlignmentDelay.clear();
-    for (auto& tags : dryGenerations) tags.assign(static_cast<size_t>(maximumDelay + 8), 0u);
-    for (auto& tags : wetGenerations) tags.assign(static_cast<size_t>(maximumDelay + 8), 0u);
-    delayGeneration = 1;
     dryWrite = wetWrite = 0;
+    validDelaySamples = 0;
     filterState = {};
     wasPlaying = false;
     previousBlockPosition.reset();
@@ -166,13 +166,8 @@ void ReverseLabAudioProcessor::timerCallback()
 
 void ReverseLabAudioProcessor::invalidateDelayLines() noexcept
 {
-    if (++delayGeneration == 0)
-    {
-        for (auto& tags : dryGenerations) std::fill(tags.begin(), tags.end(), 0u);
-        for (auto& tags : wetGenerations) std::fill(tags.begin(), tags.end(), 0u);
-        delayGeneration = 1;
-    }
     dryWrite = wetWrite = 0;
+    validDelaySamples = 0;
 }
 
 float ReverseLabAudioProcessor::processFilters(int channel, float input, float hpHz, float lpHz) noexcept
@@ -337,12 +332,11 @@ void ReverseLabAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, ju
         {
             const auto input = buffer.getSample(channel, sample);
             dryDelay.setSample(channel, dryWrite, input);
-            dryGenerations[(size_t) channel][(size_t) dryWrite] = delayGeneration;
             const auto readDelayTap = [this, channel, delayCapacity](int tap) noexcept
             {
+                if (tap > validDelaySamples) return 0.0f;
                 const auto index = (dryWrite - tap + delayCapacity) % delayCapacity;
-                return dryGenerations[(size_t) channel][(size_t) index] == delayGeneration
-                    ? dryDelay.getSample(channel, index) : 0.0f;
+                return dryDelay.getSample(channel, index);
             };
             const auto dryNew = readDelayTap(latency);
             const auto dry = latencyTransitionRemaining > 0
@@ -351,12 +345,11 @@ void ReverseLabAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, ju
             auto wet = engine.processSample(channel, input, settings);
             wet = processFilters(channel, wet, hp, lp);
             wetAlignmentDelay.setSample(channel, wetWrite, wet);
-            wetGenerations[(size_t) channel][(size_t) wetWrite] = delayGeneration;
             const auto readWetTap = [this, channel, delayCapacity](int offset) noexcept
             {
+                if (offset > validDelaySamples) return 0.0f;
                 const auto index = (wetWrite - offset + delayCapacity) % delayCapacity;
-                return wetGenerations[(size_t) channel][(size_t) index] == delayGeneration
-                    ? wetAlignmentDelay.getSample(channel, index) : 0.0f;
+                return wetAlignmentDelay.getSample(channel, index);
             };
             auto& tap = wetTaps[(size_t) channel];
             const auto desiredOffset = juce::jmax(0, latency - engine.getActiveLength(channel));
@@ -386,6 +379,7 @@ void ReverseLabAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, ju
         engine.advance();
         dryWrite = (dryWrite + 1) % delayCapacity;
         wetWrite = (wetWrite + 1) % delayCapacity;
+        validDelaySamples = juce::jmin(delayCapacity - 1, validDelaySamples + 1);
         if (latencyTransitionRemaining > 0) --latencyTransitionRemaining;
         if ((sample & 15) == 0)
         {
@@ -469,8 +463,8 @@ void ReverseLabAudioProcessor::getStateInformation(juce::MemoryBlock& destinatio
 {
     auto state = parameters.copyState();
     state.setProperty("program", currentProgram.load(std::memory_order_acquire), nullptr);
-    state.setProperty("editorWidth", editorWidth, nullptr);
-    state.setProperty("editorHeight", editorHeight, nullptr);
+    state.setProperty("editorWidth", editorWidth.load(std::memory_order_relaxed), nullptr);
+    state.setProperty("editorHeight", editorHeight.load(std::memory_order_relaxed), nullptr);
     if (auto xml = state.createXml()) copyXmlToBinary(*xml, destination);
 }
 
@@ -486,8 +480,10 @@ void ReverseLabAudioProcessor::setStateInformation(const void* data, int size)
             currentProgram.store(restoredProgram, std::memory_order_release);
             pendingProgram.store(restoredProgram, std::memory_order_release);
             programChangeRequested.store(false, std::memory_order_release);
-            editorWidth = juce::jlimit(720, 1440, static_cast<int>(state.getProperty("editorWidth", 900)));
-            editorHeight = juce::jlimit(460, 920, static_cast<int>(state.getProperty("editorHeight", 610)));
+            editorWidth.store(juce::jlimit(720, 1440, static_cast<int>(state.getProperty("editorWidth", 900))),
+                              std::memory_order_relaxed);
+            editorHeight.store(juce::jlimit(460, 920, static_cast<int>(state.getProperty("editorHeight", 610))),
+                               std::memory_order_relaxed);
             parameters.replaceState(state);
             processingResetRequested.store(true, std::memory_order_release);
         }

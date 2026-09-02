@@ -1,4 +1,4 @@
-# ReverseLab 1.0.1
+# ReverseLab 1.0.2
 
 ReverseLab is a tempo-synchronised stereo reverse effect for Cubase on macOS.
 
@@ -6,7 +6,7 @@ ReverseLab is a tempo-synchronised stereo reverse effect for Cubase on macOS.
 
 Download the current `.pkg` from [GitHub Releases](https://github.com/TheWhykiki/ReverseLab/releases/latest), open it, and follow the installer. It installs the universal VST3 into `/Library/Audio/Plug-Ins/VST3`. Restart Cubase or trigger a plug-in rescan afterwards.
 
-Because the current package is ad-hoc signed rather than Developer-ID signed and Apple-notarized, Gatekeeper will block it on first launch. On macOS 14 and earlier, **Control-click → Open** on the `.pkg` works; on macOS 15 (Sequoia) the Control-click bypass no longer exists — open the file once, then go to **System Settings → Privacy & Security** and choose **Open Anyway**. Alternatively unzip the raw VST3 from the release, copy it to `~/Library/Audio/Plug-Ins/VST3`, and remove the quarantine flag with `xattr -dr com.apple.quarantine ~/Library/Audio/Plug-Ins/VST3/ReverseLab.vst3`. The release also includes SHA-256 checksums.
+The VST3 inside the current release is ad-hoc signed, but the `.pkg` itself is unsigned and the release is not Apple-notarized. Gatekeeper will therefore block the installer on first launch. Open it once, then go to **System Settings → Privacy & Security** and choose **Open Anyway**. Alternatively unzip the raw VST3 from the release, copy it to `~/Library/Audio/Plug-Ins/VST3`, and remove its quarantine flag with `xattr -dr com.apple.quarantine ~/Library/Audio/Plug-Ins/VST3/ReverseLab.vst3`. The release also includes SHA-256 checksums.
 
 ## Build
 
@@ -24,6 +24,8 @@ The project builds a universal `arm64`/`x86_64` VST3. Install it only after test
 ./scripts/install-local.sh Release
 ```
 
+`./scripts/package-release.sh Release` creates the `.pkg`, VST3 ZIP, and checksums. For a Developer-ID-signed and notarized package, set `REVERSELAB_APPLICATION_IDENTITY`, `REVERSELAB_INSTALLER_IDENTITY`, and `REVERSELAB_NOTARY_PROFILE` to the corresponding signing identities and `notarytool` keychain profile before running it.
+
 The currently verified local installation uses the user-level VST3 directory, which Cubase scans without administrator privileges:
 
 `~/Library/Audio/Plug-Ins/VST3/ReverseLab.vst3`
@@ -38,6 +40,7 @@ The currently verified local installation uses the user-level VST3 directory, wh
 - Six factory programs and full Cubase automation/state restoration
 
 Changing segment length changes the reported plug-in latency. Cubase compensates other tracks, while ReverseLab delays its dry path internally to maintain alignment.
+ReverseLab keeps at most 16 seconds of history; `2 Bars` is therefore capped only below 30 BPM in 4/4 (or equivalent very long meters).
 
 ## Continuous integration
 
@@ -48,7 +51,7 @@ Every push and pull request builds the universal VST3 and runs the DSP/processor
 - JUCE 8.0.15, VST3 SDK 3.8
 - Universal `arm64` and `x86_64`
 - Minimum deployment target macOS 11.0 in both binary slices
-- Ad-hoc signed; public release packages are not yet Apple-notarized
+- Embedded VST3 ad-hoc signed; public `.pkg` unsigned and not yet Apple-notarized
 - Cubase 15 `vstscanner` exit code 0
 - REAPER 7.79 native-arm64 host test: VST3 instantiated, 26 parameters exposed, project state saved, 4 s offline render completed at 44.1 kHz/24-bit stereo with no clipped samples
 - Automated DSP and processor tests pass at 44.1/48/88.2/96/192 kHz, variable block sizes, continuous free timing, latency-aligned bypass, state restoration, reset invalidation, 0.25×/1×/4× speed, feedback stability, Freeze/Unfreeze recovery, superseded latency requests, and deterministic randomisation

@@ -9,8 +9,7 @@ void ReverseEngine::prepare(double newSampleRate, int maximumLengthSamples)
     sampleRate = newSampleRate;
     capacity = juce::jmax(4096, maximumLengthSamples + 8);
     ring.setSize(2, capacity, false, true, false);
-    for (auto& tags : generations)
-        tags.assign(static_cast<size_t>(capacity), 0u);
+    generations.assign(static_cast<size_t>(capacity), 0u);
     generation = 1;
     reset();
 }
@@ -19,11 +18,11 @@ void ReverseEngine::reset() noexcept
 {
     if (++generation == 0)
     {
-        for (auto& tags : generations)
-            std::fill(tags.begin(), tags.end(), 0u);
+        std::fill(generations.begin(), generations.end(), 0u);
         generation = 1;
     }
     writePosition = 0;
+    wroteCurrentPosition = false;
     for (size_t channel = 0; channel < heads.size(); ++channel)
     {
         heads[channel] = {};
@@ -58,10 +57,10 @@ float ReverseEngine::readInterpolated(int channel, float position) const noexcep
     const auto frac = position - static_cast<float>(p0);
     channel = juce::jlimit(0, 1, channel);
     const auto* data = ring.getReadPointer(channel);
-    const auto sampleAt = [this, channel, data](int index) noexcept
+    const auto sampleAt = [this, data](int index) noexcept
     {
         index = wrap(index);
-        return generations[(size_t) channel][(size_t) index] == generation ? data[index] : 0.0f;
+        return generations[(size_t) index] == generation ? data[index] : 0.0f;
     };
     const auto y0 = sampleAt(p0 - 1);
     const auto y1 = sampleAt(p0);
@@ -219,7 +218,7 @@ float ReverseEngine::processSample(int channel, float input, const EngineSetting
     {
         const auto write = juce::jlimit(-4.0f, 4.0f, input + wet * settings.feedback);
         ring.setSample(channel, writePosition, std::isfinite(write) ? write : 0.0f);
-        generations[(size_t) channel][(size_t) writePosition] = generation;
+        wroteCurrentPosition = true;
     }
 
     head.phase += 1.0f;
@@ -232,6 +231,9 @@ float ReverseEngine::processSample(int channel, float input, const EngineSetting
 
 void ReverseEngine::advance() noexcept
 {
+    if (wroteCurrentPosition)
+        generations[(size_t) writePosition] = generation;
+    wroteCurrentPosition = false;
     writePosition = (writePosition + 1) % capacity;
 }
 } // namespace rl

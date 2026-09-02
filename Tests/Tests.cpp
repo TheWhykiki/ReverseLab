@@ -209,13 +209,13 @@ public:
             for (int n = 0; n < length + 1800; ++n)
             {
                 const auto input = 0.5f * std::sin(0.071f * static_cast<float>(n));
-                const auto output = longEngine.processSample(0, input, s);
+                const auto longWet = longEngine.processSample(0, input, s);
                 (void) longEngine.processSample(1, input, s);
                 longEngine.advance();
                 if (n >= length + 1300)
                 {
-                    heldMinimum = juce::jmin(heldMinimum, output);
-                    heldMaximum = juce::jmax(heldMaximum, output);
+                    heldMinimum = juce::jmin(heldMinimum, longWet);
+                    heldMaximum = juce::jmax(heldMaximum, longWet);
                 }
             }
             expectLessThan(heldMaximum - heldMinimum, 0.001f,
@@ -249,11 +249,11 @@ public:
             float minimum = 10.0f, maximum = -10.0f;
             for (int n = 0; n < 256; ++n)
             {
-                const auto output = freezeEngine.processSample(0, 0.0f, s);
+                const auto unfrozenWet = freezeEngine.processSample(0, 0.0f, s);
                 (void) freezeEngine.processSample(1, 0.0f, s);
                 freezeEngine.advance();
-                minimum = juce::jmin(minimum, output);
-                maximum = juce::jmax(maximum, output);
+                minimum = juce::jmin(minimum, unfrozenWet);
+                maximum = juce::jmax(maximum, unfrozenWet);
             }
             expect(maximum - minimum > 0.05f,
                    "Unfreeze must resume motion instead of holding a DC value");
@@ -284,6 +284,22 @@ public:
         expectEquals(processor.getCurrentLatencySamples(), 6600);
         expect(processor.getBypassParameter() == processor.parameters.getParameter(rl::params::bypass),
                "The VST3 host bypass must use ReverseLab's latency-aligned bypass parameter");
+
+        beginTest("Tempo-sync history is capped at sixteen seconds");
+        {
+            ReverseLabAudioProcessor slowTempo;
+            setParameter(slowTempo, rl::params::sync, 1.0f);
+            setParameter(slowTempo, rl::params::link, 1.0f);
+            setParameter(slowTempo, rl::params::leftSize, 14.0f); // 2 Bars
+            TestPlayHead slowPlayHead;
+            slowPlayHead.position.setBpm(20.0);
+            slowPlayHead.position.setTimeSignature(juce::AudioPlayHead::TimeSignature { 4, 4 });
+            slowTempo.setPlayHead(&slowPlayHead);
+            slowTempo.prepareToPlay(48000.0, 256);
+            expectEquals(slowTempo.getLatencySamples(), 16 * 48000,
+                         "Very slow two-bar segments must respect the bounded history allocation");
+            slowTempo.setPlayHead(nullptr);
+        }
 
         beginTest("A reverted length cancels a pending latency increase");
         {

@@ -1,7 +1,6 @@
 #pragma once
 
 #include <juce_audio_processors/juce_audio_processors.h>
-#include <vector>
 #include "Parameters.h"
 #include "ReverseEngine.h"
 
@@ -42,8 +41,16 @@ public:
     [[nodiscard]] float getScopeSample(int index) const noexcept;
     [[nodiscard]] int getScopeWriteIndex() const noexcept { return scopeWrite.load(); }
     [[nodiscard]] float getEnginePhase(int channel) const noexcept { return engine.getNormalizedPhase(channel); }
-    [[nodiscard]] juce::Point<int> getLastEditorSize() const noexcept { return { editorWidth, editorHeight }; }
-    void setLastEditorSize(int width, int height) noexcept { editorWidth = width; editorHeight = height; }
+    [[nodiscard]] juce::Point<int> getLastEditorSize() const noexcept
+    {
+        return { editorWidth.load(std::memory_order_relaxed),
+                 editorHeight.load(std::memory_order_relaxed) };
+    }
+    void setLastEditorSize(int width, int height) noexcept
+    {
+        editorWidth.store(width, std::memory_order_relaxed);
+        editorHeight.store(height, std::memory_order_relaxed);
+    }
 #if REVERSELAB_UNIT_TESTS
     void servicePendingHostUpdatesForTesting() { timerCallback(); }
 #endif
@@ -65,7 +72,6 @@ private:
     rl::ReverseEngine engine;
     juce::AudioBuffer<float> dryDelay;
     juce::AudioBuffer<float> wetAlignmentDelay;
-    std::array<std::vector<uint32_t>, 2> dryGenerations, wetGenerations;
     std::array<OnePoleState, 2> filterState;
     std::array<WetTap, 2> wetTaps;
     std::array<std::atomic<float>, 256> scope {};
@@ -84,6 +90,7 @@ private:
                                smoothedCrossfade, smoothedFeedback, smoothedHighpass,
                                smoothedLowpass, smoothedOffset, smoothedRandom;
     int dryWrite = 0, wetWrite = 0;
+    int validDelaySamples = 0;
     int maximumDelay = 1;
     int activeProcessingLatency = 0;
     int previousProcessingLatency = 0;
@@ -96,9 +103,8 @@ private:
     std::optional<int64_t> previousBlockPosition;
     bool lastRetriggerParameter = false;
     uint32_t appliedSeed = 0;
-    uint32_t delayGeneration = 1;
-    int editorWidth = 900;
-    int editorHeight = 610;
+    std::atomic<int> editorWidth { 900 };
+    std::atomic<int> editorHeight { 610 };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ReverseLabAudioProcessor)
 };

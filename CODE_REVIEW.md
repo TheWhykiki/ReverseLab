@@ -43,6 +43,10 @@
 38. **Installable CI artifact** — CI wraps the VST3 bundle with `ditto` before artifact upload so the Mach-O executable bit and bundle metadata survive download.
 39. **Unfreeze history accounting** — overwrite distance is now paused during Freeze and rebased against the current reader/writer positions when writing resumes, preventing long captures from collapsing to a held DC value after Unfreeze.
 40. **Stale pending latency** — every valid engine length refreshes the pending host request, including a return to the currently active length, so a superseded latency increase cannot be acknowledged after the DSP has already reverted.
+41. **Unbounded per-instance memory pressure** — history is now explicitly capped at 16 seconds. The dry/wet delay generation maps were replaced by a constant-time valid-history counter, and the engine shares one generation map across each stereo frame. Core history storage drops from about 70.3 MiB to 20.5 MiB per instance at 48 kHz while reset invalidation remains allocation-free on the audio thread.
+42. **Editor-size data race** — the message/state paths could read and write plain `int` dimensions concurrently. Width and height are now atomics and state serialization uses explicit relaxed loads/stores.
+43. **Misreported installer signature** — documentation called the release package ad-hoc signed even though only its embedded VST3 was ad-hoc signed. The package is now accurately identified as unsigned, and the packaging script supports Developer ID application/installer identities plus `notarytool` submission and stapling when credentials are supplied.
+44. **Duplicated JUCE linkage in test executables** — the test and A/B targets no longer link the plug-in shared-code target and another copy of the JUCE modules into one executable. They compile the product sources with their own console-app configuration, removing the standalone-definition collision and redundant link payload.
 
 ## Verification
 
@@ -54,11 +58,11 @@
 - Link, Freeze, and momentary Retrigger were exercised in the native preview editor.
 - REAPER reloads the freshly installed VST3 and identifies it as `ReverseLab (Whykiki Audio)`; the dedicated unlinked-stereo regression remains green after the linked-control UI fix.
 - The installed user-level VST3 passes strict code-signature verification and both binary slices declare macOS 11.0 as their minimum OS.
-- Cubase 15 `vstscanner` exits with code 0 and identifies ReverseLab 1.0.0 as a native VST3 `Fx|Delay`.
+- Cubase 15 `vstscanner` exits with code 0 and identifies ReverseLab 1.0.2 as a native VST3 `Fx|Delay`.
 - REAPER 7.79 (native arm64) discovers and instantiates ReverseLab as VST3, exposes 26 parameters in the current build, saves/restores the plug-in in an `.rpp`, and completes a four-second offline render at 44.1 kHz/24-bit stereo without clipped samples.
 - A separate REAPER stress project creates 32 parallel ReverseLab instances, varies timing, speed, crossfade, feedback, randomisation, and stereo offset, saves all 32 VST3 states, and completes a two-second offline render without clipped samples.
 
-- The full suite (24 test groups) passes on macOS and Linux; targeted regressions cover speed automation, wet-tap transitions, maximum-length 4× history, Unfreeze recovery, and superseded latency requests.
+- The full suite (25 test groups) passes on macOS and Linux; targeted regressions cover speed automation, wet-tap transitions, maximum-length 4× history, Unfreeze recovery, superseded latency requests, and the 16-second history cap.
 
 ## Remaining limits
 
@@ -67,7 +71,6 @@
 - Freeze audio is intentionally not serialized, matching the product contract.
 - A silent preview cannot validate the visual density of real program material; this is covered only when audio flows in Cubase.
 - Cubase still needs a short listening/automation/offline-render acceptance pass inside a real user project; its scanner and REAPER's independent native instantiation/offline-render path are green.
-- The 32 s ring plus dry and wet alignment delays cost roughly 36 MB per instance at 48 kHz (three stereo float buffers); 32 instances exceed 1 GB. Reducing the maximum segment to 16 s would halve this without affecting any tempo-sync value at 40 BPM or above.
+- The bounded ring plus dry and wet alignment delays and the shared validity map cost about 20.5 MiB per instance at 48 kHz and 82.0 MiB at 192 kHz. Thirty-two instances therefore use about 0.64 GiB or 2.56 GiB respectively for core history. The 16-second cap affects `2 Bars` below 30 BPM in 4/4 and correspondingly long unusual meters.
 - Feedback is taken from the engine output before the high-/low-pass stage, so the filters shape only the output and not the repeats. "Frozen Texture" combines Freeze with a feedback amount that has no effect while frozen.
-- `ReverseLabTests` links both the shared-code target and the JUCE modules directly, which compiles every JUCE module twice and produces a `JUCE_STANDALONE_APPLICATION` redefinition warning; linking the tests against `ReverseLab` alone would halve build time.
 - The repository has no LICENSE file; JUCE 8 usage terms (AGPLv3 or a JUCE plan) and the terms for ReverseLab's own code should be stated explicitly.

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(ReverseLab VERSION 1.0.1 LANGUAGES C CXX)
+project(ReverseLab VERSION 1.0.2 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -48,11 +48,17 @@ target_link_libraries(ReverseLab PRIVATE
 
 juce_add_console_app(ReverseLabTests PRODUCT_NAME "ReverseLab Tests")
 target_sources(ReverseLabTests PRIVATE
-    Tests/Tests.cpp)
+    Tests/Tests.cpp
+    Source/PluginProcessor.cpp
+    Source/PluginEditor.cpp
+    Source/ReverseEngine.cpp)
 target_include_directories(ReverseLabTests PRIVATE Source)
-target_compile_definitions(ReverseLabTests PRIVATE REVERSELAB_UNIT_TESTS=1)
+target_compile_definitions(ReverseLabTests PRIVATE
+    REVERSELAB_UNIT_TESTS=1
+    JucePlugin_Name="ReverseLab"
+    REVERSELAB_RELEASE_CHANNEL="Stable"
+    REVERSELAB_VERSION_STRING="${PROJECT_VERSION}")
 target_link_libraries(ReverseLabTests PRIVATE
-    ReverseLab
     juce::juce_audio_utils
     juce::juce_dsp
     PUBLIC juce::juce_recommended_config_flags
@@ -62,10 +68,17 @@ enable_testing()
 add_test(NAME ReverseLabDSP COMMAND ReverseLabTests)
 
 juce_add_console_app(ReverseLabRenderAB PRODUCT_NAME "ReverseLab A-B Renderer")
-target_sources(ReverseLabRenderAB PRIVATE Tests/RenderAB.cpp)
+target_sources(ReverseLabRenderAB PRIVATE
+    Tests/RenderAB.cpp
+    Source/PluginProcessor.cpp
+    Source/PluginEditor.cpp
+    Source/ReverseEngine.cpp)
 target_include_directories(ReverseLabRenderAB PRIVATE Source)
+target_compile_definitions(ReverseLabRenderAB PRIVATE
+    JucePlugin_Name="ReverseLab"
+    REVERSELAB_RELEASE_CHANNEL="Stable"
+    REVERSELAB_VERSION_STRING="${PROJECT_VERSION}")
 target_link_libraries(ReverseLabRenderAB PRIVATE
-    ReverseLab
     juce::juce_audio_utils
     juce::juce_dsp
     PUBLIC juce::juce_recommended_config_flags

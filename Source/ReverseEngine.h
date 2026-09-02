@@ -71,7 +71,9 @@ private:
     int wrap(int position) const noexcept;
 
     juce::AudioBuffer<float> ring;
-    std::array<std::vector<uint32_t>, 2> generations;
+    // Both channels are written at the same ring position before advance(), so a single
+    // generation map is sufficient to invalidate the stereo frame after reset().
+    std::vector<uint32_t> generations;
     std::array<Head, 2> heads;
     std::array<std::atomic<float>, 2> publishedPhase { 0.0f, 0.0f };
     int writePosition = 0;
@@ -79,5 +81,6 @@ private:
     double sampleRate = 44100.0;
     uint32_t randomState = 4242;
     uint32_t generation = 1;
+    bool wroteCurrentPosition = false;
 };
 } // namespace rl

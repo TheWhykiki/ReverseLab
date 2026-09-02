@@ -73,4 +73,3 @@
 - Cubase still needs a short listening/automation/offline-render acceptance pass inside a real user project; its scanner and REAPER's independent native instantiation/offline-render path are green.
 - The bounded ring plus dry and wet alignment delays and the shared validity map cost about 20.5 MiB per instance at 48 kHz and 82.0 MiB at 192 kHz. Thirty-two instances therefore use about 0.64 GiB or 2.56 GiB respectively for core history. The 16-second cap affects `2 Bars` below 30 BPM in 4/4 and correspondingly long unusual meters.
 - Feedback is taken from the engine output before the high-/low-pass stage, so the filters shape only the output and not the repeats. "Frozen Texture" combines Freeze with a feedback amount that has no effect while frozen.
-- The repository has no LICENSE file; JUCE 8 usage terms (AGPLv3 or a JUCE plan) and the terms for ReverseLab's own code should be stated explicitly.

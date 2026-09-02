@@ -2,6 +2,8 @@
 
 ReverseLab is a tempo-synchronised stereo reverse effect for Cubase on macOS.
 
+Copyright © 2026 Whykiki Audio. ReverseLab is free software licensed under the GNU Affero General Public License v3.0; see [LICENSE](LICENSE). JUCE remains available under its own dual-licensing terms.
+
 ## Download and install
 
 Download the current `.pkg` from [GitHub Releases](https://github.com/TheWhykiki/ReverseLab/releases/latest), open it, and follow the installer. It installs the universal VST3 into `/Library/Audio/Plug-Ins/VST3`. Restart Cubase or trigger a plug-in rescan afterwards.

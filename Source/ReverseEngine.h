@@ -42,6 +42,8 @@ public:
                    * sizeof(float)
                + generations.capacity() * sizeof(uint32_t);
     }
+    // True once Freeze is engaged on a complete capture (i.e. the pre-roll has finished).
+    [[nodiscard]] bool isHoldingFrozenCapture() const noexcept { return frozenHold; }
     void advance() noexcept;
     void setSeed(uint32_t seed) noexcept;
 
@@ -90,5 +92,6 @@ private:
     uint32_t randomState = 4242;
     uint32_t generation = 1;
     bool wroteCurrentPosition = false;
+    bool frozenHold = false;
 };
 } // namespace rl

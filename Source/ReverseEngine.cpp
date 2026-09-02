@@ -23,6 +23,7 @@ void ReverseEngine::release()
     writePosition = 0;
     generation = 1;
     wroteCurrentPosition = false;
+    frozenHold = false;
     for (size_t channel = 0; channel < heads.size(); ++channel)
     {
         heads[channel] = {};
@@ -40,6 +41,7 @@ void ReverseEngine::reset() noexcept
     writePosition = 0;
     capturedFrames = 0;
     wroteCurrentPosition = false;
+    frozenHold = false;
     for (size_t channel = 0; channel < heads.size(); ++channel)
     {
         heads[channel] = {};
@@ -105,8 +107,8 @@ void ReverseEngine::beginSegment(int channel, int requestedLength, const EngineS
                                      requestedLength);
     const auto stereo = channel == 0 ? -settings.stereoOffset : settings.stereoOffset;
     const auto randomOffset = static_cast<int>((nextRandom() * 2.0f - 1.0f)
-                                                * settings.randomAmount * 0.5f * head.activeLength);
-    const auto channelOffset = static_cast<int>(stereo * 0.5f * head.activeLength);
+                                                * settings.randomAmount * 0.5f * static_cast<float>(head.activeLength));
+    const auto channelOffset = static_cast<int>(stereo * 0.5f * static_cast<float>(head.activeLength));
     head.segmentEnd = wrap(writePosition - 1 - randomOffset - channelOffset);
     head.phase = 0.0f;
     head.readOffset = 0.0f;
@@ -124,8 +126,8 @@ void ReverseEngine::prepareNextSegment(int channel, int requestedLength, const E
                                   requestedLength);
     const auto stereo = channel == 0 ? -settings.stereoOffset : settings.stereoOffset;
     const auto randomOffset = static_cast<int>((nextRandom() * 2.0f - 1.0f)
-                                                * settings.randomAmount * 0.5f * head.nextLength);
-    const auto channelOffset = static_cast<int>(stereo * 0.5f * head.nextLength);
+                                                * settings.randomAmount * 0.5f * static_cast<float>(head.nextLength));
+    const auto channelOffset = static_cast<int>(stereo * 0.5f * static_cast<float>(head.nextLength));
     head.nextEnd = wrap(writePosition - 1 - randomOffset - channelOffset);
     head.nextLastRead = 0.0f;
     head.nextHistoryRemaining = distanceFromWriter(static_cast<float>(head.nextEnd));
@@ -139,8 +141,7 @@ float ReverseEngine::readCaptured(int channel, int end, float offset, float spee
     if (mayOverwrite)
     {
         // Reader and writer approach at (speed + 1) samples per sample. The remaining distance
-        // is paused during Freeze and rebased when writing resumes, because Freeze advances the
-        // logical write position without replacing any ring samples.
+        // is paused during Freeze (the writer stands still) and rebased when writing resumes.
         if (remaining <= 8.0f) exhausted = true;
         remaining -= speed + 1.0f;
     }
@@ -161,6 +162,7 @@ float ReverseEngine::processSample(int channel, float input, const EngineSetting
     const auto requiredCapture = juce::jlimit(16, capacity - 8,
                                               juce::jmax(settings.leftLength, settings.rightLength));
     const bool freezeActive = settings.freeze && capturedFrames >= requiredCapture;
+    frozenHold = freezeActive;
     const bool triggerEdge = settings.retrigger && !head.lastRetrigger;
     head.lastRetrigger = settings.retrigger;
     if (head.activeLength <= 1 || triggerEdge)
@@ -205,8 +207,8 @@ float ReverseEngine::processSample(int channel, float input, const EngineSetting
                             !freezeActive, head.historyRemaining, head.lastRead,
                             head.readExhausted);
 
-    const auto fadeSamples = juce::jlimit(1.0f, head.activeLength * 0.25f,
-                                         head.activeLength * settings.crossfade);
+    const auto fadeSamples = juce::jlimit(1.0f, static_cast<float>(head.activeLength) * 0.25f,
+                                         static_cast<float>(head.activeLength) * settings.crossfade);
     const auto transitionStart = static_cast<float>(head.activeLength) - fadeSamples;
     if (head.phase >= transitionStart)
     {
@@ -260,6 +262,10 @@ void ReverseEngine::advance() noexcept
         capturedFrames = juce::jmin(capacity, capturedFrames + 1);
     }
     wroteCurrentPosition = false;
-    writePosition = (writePosition + 1) % capacity;
+    // While Freeze holds a capture the writer stands still, so every new segment starts at the
+    // same captured window. Advancing it would move each segment start into untagged history
+    // and the frozen texture would fade to silence after one segment length.
+    if (!frozenHold)
+        writePosition = (writePosition + 1) % capacity;
 }
 } // namespace rl

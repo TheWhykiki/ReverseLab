@@ -85,14 +85,17 @@ public:
             engine.advance();
         }
         settings.freeze = true;
-        float energy = 0.0f;
-        for (int i = 0; i < 256; ++i)
+        float energy = 0.0f, lastSegmentEnergy = 0.0f;
+        for (int i = 0; i < 128 * 8; ++i) // eight segment lengths: the texture must not fade out
         {
-            energy += std::abs(engine.processSample(0, 0.0f, settings));
+            const auto wet = std::abs(engine.processSample(0, 0.0f, settings));
             (void) engine.processSample(1, 0.0f, settings);
             engine.advance();
+            energy += wet;
+            if (i >= 128 * 7) lastSegmentEnergy += wet;
         }
         expect(energy > 1.0f);
+        expect(lastSegmentEnergy > 1.0f, "A frozen capture must still play after several segment lengths");
 
         beginTest("Freeze requested before capture pre-rolls instead of latching silence");
         {
@@ -434,6 +437,68 @@ public:
             }
             expect(frozenEnergy > 10.0,
                    "Restoring Freeze without serialized audio must not latch a 100%-wet instance at zero");
+        }
+
+        beginTest("A frozen capture survives transport restart and loop jumps");
+        {
+            // Two identical instances: both freeze the same 200 ms sine capture. One then sees a
+            // transport loop jump (position back to zero) followed by a stop/start while the input
+            // is silent. Its output must keep playing the frozen texture exactly like the reference.
+            auto makeFrozen = [&](ReverseLabAudioProcessor& p, TestPlayHead& head)
+            {
+                setParameter(p, rl::params::sync, 0.0f);
+                setParameter(p, rl::params::link, 1.0f);
+                setParameter(p, rl::params::leftFreeMs, 200.0f);
+                setParameter(p, rl::params::mix, 100.0f);
+                setParameter(p, rl::params::feedback, 0.0f);
+                setParameter(p, rl::params::random, 0.0f);
+                setParameter(p, rl::params::stereoOffset, 0.0f);
+                setParameter(p, rl::params::freeze, 1.0f);
+                head.position.setIsPlaying(true);
+                head.position.setTimeInSamples(0);
+                p.setPlayHead(&head);
+                p.prepareToPlay(48000.0, 256);
+            };
+            ReverseLabAudioProcessor reference, looped;
+            TestPlayHead referenceHead, loopedHead;
+            makeFrozen(reference, referenceHead);
+            makeFrozen(looped, loopedHead);
+            juce::AudioBuffer<float> referenceBlock(2, 256), loopedBlock(2, 256);
+            constexpr float w = juce::MathConstants<float>::twoPi * 440.0f / 48000.0f;
+            int64_t referenceTime = 0, loopedTime = 0;
+            float maxDifference = 0.0f, energyAfterJump = 0.0f, referenceEnergyAfterJump = 0.0f, energyBeforeJump = 0.0f;
+            for (int blockIndex = 0; blockIndex < 400; ++blockIndex)
+            {
+                const bool capturing = blockIndex < 150; // ~0.8 s: pre-roll completes, Freeze engages
+                for (int i = 0; i < 256; ++i)
+                {
+                    const auto value = capturing ? 0.5f * std::sin(w * static_cast<float>(blockIndex * 256 + i)) : 0.0f;
+                    referenceBlock.setSample(0, i, value); referenceBlock.setSample(1, i, value);
+                    loopedBlock.setSample(0, i, value);    loopedBlock.setSample(1, i, value);
+                }
+                if (blockIndex == 200) loopedTime = 0;                       // loop cycle: jump back to the start
+                if (blockIndex == 300) loopedHead.position.setIsPlaying(false); // stop ...
+                if (blockIndex == 302) loopedHead.position.setIsPlaying(true);  // ... and start again
+                referenceHead.position.setTimeInSamples(referenceTime);
+                loopedHead.position.setTimeInSamples(loopedTime);
+                reference.processBlock(referenceBlock, midi);
+                looped.processBlock(loopedBlock, midi);
+                referenceTime += 256; loopedTime += 256;
+                if (blockIndex >= 200)
+                    for (int i = 0; i < 256; ++i)
+                    {
+                        maxDifference = juce::jmax(maxDifference, std::abs(referenceBlock.getSample(0, i) - loopedBlock.getSample(0, i)));
+                        energyAfterJump += loopedBlock.getSample(0, i) * loopedBlock.getSample(0, i);
+                        referenceEnergyAfterJump += referenceBlock.getSample(0, i) * referenceBlock.getSample(0, i);
+                    }
+                else if (blockIndex >= 150)
+                    for (int i = 0; i < 256; ++i) energyBeforeJump += loopedBlock.getSample(0, i) * loopedBlock.getSample(0, i);
+            }
+            logMessage("  energy 150-199: " + juce::String(energyBeforeJump) + "  looped after: " + juce::String(energyAfterJump) + "  reference after: " + juce::String(referenceEnergyAfterJump));
+            expectGreaterThan(energyAfterJump, 1.0f, "The frozen texture must keep sounding after the jump");
+            expectLessThan(maxDifference, 1.0e-3f, "Loop jumps and stop/start must not replace a frozen capture");
+            reference.setPlayHead(nullptr);
+            looped.setPlayHead(nullptr);
         }
 
         beginTest("State restore rejects a valid XML tree belonging to another processor");

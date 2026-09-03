@@ -43,10 +43,11 @@ package="$dist/ReverseLab-$version-macOS-universal.pkg"
 if [[ -n "$application_identity" ]]; then
     codesign --force --deep --options runtime --timestamp \
         --sign "$application_identity" "$staged_plugin"
-    codesign --verify --deep --strict --verbose=2 "$staged_plugin"
 else
-    echo "Warning: REVERSELAB_APPLICATION_IDENTITY is unset; the VST3 remains ad-hoc signed." >&2
+    echo "Warning: REVERSELAB_APPLICATION_IDENTITY is unset; applying a fresh ad-hoc signature." >&2
+    codesign --force --deep --sign - "$staged_plugin"
 fi
+codesign --verify --deep --strict --verbose=2 "$staged_plugin"
 
 pkgbuild_args=(
     --root "$stage"
@@ -69,6 +70,11 @@ if [[ -n "$notary_profile" ]]; then
     xcrun notarytool submit "$package" --keychain-profile "$notary_profile" --wait
     xcrun stapler staple "$package"
     xcrun stapler validate "$package"
+    # The package's notarization ticket also covers its nested VST3. Staple that ticket to the
+    # standalone bundle before archiving it so the ZIP remains verifiable while offline.
+    xcrun stapler staple "$staged_plugin"
+    xcrun stapler validate "$staged_plugin"
+    codesign --verify --deep --strict --verbose=2 "$staged_plugin"
 fi
 
 ditto -c -k --sequesterRsrc --keepParent \

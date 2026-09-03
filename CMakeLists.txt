@@ -47,6 +47,16 @@ target_link_libraries(ReverseLab PRIVATE
            juce::juce_recommended_lto_flags
            juce::juce_recommended_warning_flags)
 
+if(APPLE)
+    # JUCE creates moduleinfo.json after its first signing pass. Re-sign the completed bundle so
+    # the generated metadata is covered by the final resource seal for every CMake generator.
+    find_program(REVERSELAB_CODESIGN_EXECUTABLE codesign REQUIRED)
+    add_custom_command(TARGET ReverseLab_VST3 POST_BUILD
+        COMMAND "${REVERSELAB_CODESIGN_EXECUTABLE}" --force --deep --sign - "$<TARGET_BUNDLE_DIR:ReverseLab_VST3>"
+        COMMENT "Signing completed ReverseLab VST3 bundle"
+        VERBATIM)
+endif()
+
 juce_add_console_app(ReverseLabTests PRODUCT_NAME "ReverseLab Tests")
 target_sources(ReverseLabTests PRIVATE
     Tests/Tests.cpp

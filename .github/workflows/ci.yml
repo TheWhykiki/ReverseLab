@@ -10,7 +10,7 @@ jobs:
     name: macOS universal build + tests
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           submodules: recursive
       - name: Configure
@@ -21,13 +21,22 @@ jobs:
         run: ctest --test-dir build -C Release --output-on-failure
       - name: Verify universal slices and deployment target
         run: |
-          bin="build/ReverseLab_artefacts/Release/VST3/ReverseLab.vst3/Contents/MacOS/ReverseLab"
+          bundle="build/ReverseLab_artefacts/Release/VST3/ReverseLab.vst3"
+          bin="$bundle/Contents/MacOS/ReverseLab"
           lipo -archs "$bin" | tee /dev/stderr | grep -q "arm64"
           lipo -archs "$bin" | grep -q "x86_64"
           vtool -show-build "$bin" | grep -E "minos +11\.0"
-      - name: Preserve VST3 bundle permissions
-        run: ditto -c -k --sequesterRsrc --keepParent build/ReverseLab_artefacts/Release/VST3/ReverseLab.vst3 ReverseLab-VST3.zip
-      - uses: actions/upload-artifact@v6
+          codesign --verify --deep --strict "$bundle"
+      - name: Package and validate downloadable bundle
+        run: |
+          bundle="build/ReverseLab_artefacts/Release/VST3/ReverseLab.vst3"
+          ditto -c -k --sequesterRsrc --keepParent "$bundle" ReverseLab-VST3.zip
+          mkdir -p build/artifact-roundtrip
+          ditto -x -k ReverseLab-VST3.zip build/artifact-roundtrip
+          restored="build/artifact-roundtrip/ReverseLab.vst3"
+          test -x "$restored/Contents/MacOS/ReverseLab"
+          codesign --verify --deep --strict "$restored"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ReverseLab-VST3-${{ github.sha }}
           path: ReverseLab-VST3.zip
@@ -36,7 +45,7 @@ jobs:
     name: Linux DSP/processor tests
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           submodules: recursive
       - name: Install JUCE build dependencies
@@ -50,3 +59,34 @@ jobs:
         run: cmake --build build --target ReverseLabTests -j"$(nproc)"
       - name: Test
         run: ctest --test-dir build --output-on-failure
+
+  sanitizers:
+    name: ASan + UBSan
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          submodules: recursive
+      - name: Configure
+        run: >
+          cmake -S . -B build-asan -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DCMAKE_C_FLAGS="-fsanitize=address,undefined"
+          -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=undefined"
+          -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+          -DCMAKE_SHARED_LINKER_FLAGS="-fsanitize=address,undefined"
+          -DCMAKE_MODULE_LINKER_FLAGS="-fsanitize=address,undefined"
+      - name: Build tests
+        run: cmake --build build-asan --target ReverseLabTests ReverseLab_VST3 -j "$(sysctl -n hw.ncpu)"
+      - name: Test
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+          UBSAN_OPTIONS: print_stacktrace=1
+        run: ctest --test-dir build-asan --output-on-failure
+      - name: Verify Makefiles bundle and ZIP roundtrip
+        run: |
+          bundle="build-asan/ReverseLab_artefacts/RelWithDebInfo/VST3/ReverseLab.vst3"
+          codesign --verify --deep --strict "$bundle"
+          ditto -c -k --sequesterRsrc --keepParent "$bundle" build-asan/ReverseLab-VST3.zip
+          mkdir -p build-asan/artifact-roundtrip
+          ditto -x -k build-asan/ReverseLab-VST3.zip build-asan/artifact-roundtrip
+          codesign --verify --deep --strict build-asan/artifact-roundtrip/ReverseLab.vst3

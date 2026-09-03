@@ -68,12 +68,12 @@ int ReverseEngine::wrap(int position) const noexcept
     return position < 0 ? position + capacity : position;
 }
 
-float ReverseEngine::readInterpolated(int channel, float position) const noexcept
+float ReverseEngine::readInterpolated(int channel, double position) const noexcept
 {
-    while (position < 0.0f) position += static_cast<float>(capacity);
-    while (position >= static_cast<float>(capacity)) position -= static_cast<float>(capacity);
+    while (position < 0.0) position += static_cast<double>(capacity);
+    while (position >= static_cast<double>(capacity)) position -= static_cast<double>(capacity);
     const auto p0 = static_cast<int>(position);
-    const auto frac = position - static_cast<float>(p0);
+    const auto frac = position - static_cast<double>(p0);
     channel = juce::jlimit(0, 1, channel);
     const auto* data = ring.getReadPointer(channel);
     const auto sampleAt = [this, data](int index) noexcept
@@ -89,14 +89,14 @@ float ReverseEngine::readInterpolated(int channel, float position) const noexcep
     const auto c1 = 0.5f * (y2 - y0);
     const auto c2 = y0 - 2.5f * y1 + 2.0f * y2 - 0.5f * y3;
     const auto c3 = 0.5f * (y3 - y0) + 1.5f * (y1 - y2);
-    return ((c3 * frac + c2) * frac + c1) * frac + c0;
+    return static_cast<float>(((c3 * frac + c2) * frac + c1) * frac + c0);
 }
 
-float ReverseEngine::distanceFromWriter(float readPosition) const noexcept
+double ReverseEngine::distanceFromWriter(double readPosition) const noexcept
 {
-    auto distance = std::fmod(readPosition - static_cast<float>(writePosition),
-                              static_cast<float>(capacity));
-    if (distance < 0.0f) distance += static_cast<float>(capacity);
+    auto distance = std::fmod(readPosition - static_cast<double>(writePosition),
+                              static_cast<double>(capacity));
+    if (distance < 0.0) distance += static_cast<double>(capacity);
     return distance;
 }
 
@@ -111,10 +111,10 @@ void ReverseEngine::beginSegment(int channel, int requestedLength, const EngineS
     const auto channelOffset = static_cast<int>(stereo * 0.5f * static_cast<float>(head.activeLength));
     head.segmentEnd = wrap(writePosition - 1 - randomOffset - channelOffset);
     head.phase = 0.0f;
-    head.readOffset = 0.0f;
+    head.readOffset = 0.0;
     head.transitionPhase = 0.0f;
     head.lastRead = 0.0f;
-    head.historyRemaining = distanceFromWriter(static_cast<float>(head.segmentEnd));
+    head.historyRemaining = distanceFromWriter(static_cast<double>(head.segmentEnd));
     head.readExhausted = false;
     head.nextPrepared = false;
 }
@@ -130,24 +130,24 @@ void ReverseEngine::prepareNextSegment(int channel, int requestedLength, const E
     const auto channelOffset = static_cast<int>(stereo * 0.5f * static_cast<float>(head.nextLength));
     head.nextEnd = wrap(writePosition - 1 - randomOffset - channelOffset);
     head.nextLastRead = 0.0f;
-    head.nextHistoryRemaining = distanceFromWriter(static_cast<float>(head.nextEnd));
+    head.nextHistoryRemaining = distanceFromWriter(static_cast<double>(head.nextEnd));
     head.nextReadExhausted = false;
     head.nextPrepared = true;
 }
 
-float ReverseEngine::readCaptured(int channel, int end, float offset, float speed, bool mayOverwrite,
-                                  float& remaining, float& lastRead, bool& exhausted) const noexcept
+float ReverseEngine::readCaptured(int channel, int end, double offset, float speed, bool mayOverwrite,
+                                  double& remaining, float& lastRead, bool& exhausted) const noexcept
 {
     if (mayOverwrite)
     {
         // Reader and writer approach at (speed + 1) samples per sample. The remaining distance
         // is paused during Freeze (the writer stands still) and rebased when writing resumes.
-        if (remaining <= 8.0f) exhausted = true;
-        remaining -= speed + 1.0f;
+        if (remaining <= 8.0) exhausted = true;
+        remaining -= static_cast<double>(speed) + 1.0;
     }
 
     if (!exhausted)
-        lastRead = readInterpolated(channel, static_cast<float>(end) - offset);
+        lastRead = readInterpolated(channel, static_cast<double>(end) - offset);
     return lastRead;
 }
 
@@ -193,10 +193,10 @@ float ReverseEngine::processSample(int channel, float input, const EngineSetting
     if (head.wasFrozen && !freezeActive)
     {
         if (!head.readExhausted)
-            head.historyRemaining = distanceFromWriter(static_cast<float>(head.segmentEnd)
+            head.historyRemaining = distanceFromWriter(static_cast<double>(head.segmentEnd)
                                                         - head.readOffset);
         if (head.nextPrepared && !head.nextReadExhausted)
-            head.nextHistoryRemaining = distanceFromWriter(static_cast<float>(head.nextEnd)
+            head.nextHistoryRemaining = distanceFromWriter(static_cast<double>(head.nextEnd)
                                                             - head.nextOffset);
     }
     head.wasFrozen = freezeActive;
@@ -215,7 +215,7 @@ float ReverseEngine::processSample(int channel, float input, const EngineSetting
         if (!head.nextPrepared)
         {
             prepareNextSegment(channel, requested, settings);
-            head.nextOffset = 0.0f;
+            head.nextOffset = 0.0;
             head.transitionPhase = 0.0f;
         }
         const auto transition = juce::jlimit(0.0f, 1.0f, head.transitionPhase / fadeSamples);
@@ -224,7 +224,7 @@ float ReverseEngine::processSample(int channel, float input, const EngineSetting
                                           head.nextLastRead, head.nextReadExhausted);
         wet = wet * std::cos(transition * juce::MathConstants<float>::halfPi)
               + nextWet * std::sin(transition * juce::MathConstants<float>::halfPi);
-        head.nextOffset += settings.speed;
+        head.nextOffset += static_cast<double>(settings.speed);
         head.transitionPhase += 1.0f;
     }
 
@@ -247,7 +247,7 @@ float ReverseEngine::processSample(int channel, float input, const EngineSetting
     }
 
     head.phase += 1.0f;
-    head.readOffset += settings.speed;
+    head.readOffset += static_cast<double>(settings.speed);
     publishedPhase[(size_t) channel].store(
         juce::jlimit(0.0f, 1.0f, head.phase / static_cast<float>(juce::jmax(1, head.activeLength))),
         std::memory_order_relaxed);

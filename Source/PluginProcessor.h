@@ -1,6 +1,7 @@
 #pragma once
 
 #include <juce_audio_processors/juce_audio_processors.h>
+#include <cstdint>
 #include "Parameters.h"
 #include "ReverseEngine.h"
 
@@ -43,13 +44,33 @@ public:
     [[nodiscard]] float getEnginePhase(int channel) const noexcept { return engine.getNormalizedPhase(channel); }
     [[nodiscard]] juce::Point<int> getLastEditorSize() const noexcept
     {
-        return { editorWidth.load(std::memory_order_relaxed),
-                 editorHeight.load(std::memory_order_relaxed) };
+        const auto packed = packedEditorSize.load(std::memory_order_acquire);
+        return { static_cast<int>(static_cast<std::uint32_t>((packed & ~editorSizeRestorePendingMask) >> 32)),
+                 static_cast<int>(static_cast<std::uint32_t>(packed)) };
     }
     void setLastEditorSize(int width, int height) noexcept
     {
-        editorWidth.store(width, std::memory_order_relaxed);
-        editorHeight.store(height, std::memory_order_relaxed);
+        const auto desired = packEditorSize(width, height);
+        auto current = packedEditorSize.load(std::memory_order_acquire);
+        while ((current & editorSizeRestorePendingMask) == 0
+               && ! packedEditorSize.compare_exchange_weak(current, desired,
+                                                            std::memory_order_acq_rel,
+                                                            std::memory_order_acquire))
+        {
+        }
+    }
+    void setRestoredEditorSize(int width, int height) noexcept
+    {
+        packedEditorSize.store(packEditorSize(width, height) | editorSizeRestorePendingMask,
+                               std::memory_order_release);
+    }
+    void acknowledgeRestoredEditorSize(int width, int height) noexcept
+    {
+        auto expected = packEditorSize(width, height) | editorSizeRestorePendingMask;
+        const auto acknowledged = packEditorSize(width, height);
+        static_cast<void>(packedEditorSize.compare_exchange_strong(expected, acknowledged,
+                                                                   std::memory_order_acq_rel,
+                                                                   std::memory_order_acquire));
     }
 #if REVERSELAB_UNIT_TESTS
     void servicePendingHostUpdatesForTesting() { timerCallback(); }
@@ -76,7 +97,14 @@ private:
     void timerCallback() override;
     void invalidateDelayLines() noexcept;
     void setPlainParameter(const char* id, float plainValue);
-    void applyPendingProgramChange();
+    void applyProgramChange(int program);
+
+    static constexpr std::uint64_t editorSizeRestorePendingMask = std::uint64_t { 1 } << 63;
+    static constexpr std::uint64_t packEditorSize(int width, int height) noexcept
+    {
+        return (static_cast<std::uint64_t>(static_cast<std::uint32_t>(width)) << 32)
+               | static_cast<std::uint64_t>(static_cast<std::uint32_t>(height));
+    }
 
     rl::ReverseEngine engine;
     juce::AudioBuffer<float> dryDelay;
@@ -92,9 +120,8 @@ private:
     std::atomic<double> publishedBeatsPerBar { 4.0 };
     std::atomic<bool> retriggerResetRequested { false };
     std::atomic<bool> processingResetRequested { false };
-    std::atomic<bool> programChangeRequested { false };
     std::atomic<int> currentProgram { 0 };
-    std::atomic<int> pendingProgram { 0 };
+    std::atomic<int> pendingProgramRequest { -1 };
     juce::SmoothedValue<float> smoothedMix, smoothedOutput, smoothedBypass, smoothedSpeed,
                                smoothedCrossfade, smoothedFeedback, smoothedHighpass,
                                smoothedLowpass, smoothedHighpassEnabled, smoothedLowpassEnabled,
@@ -112,9 +139,9 @@ private:
     bool wasPlaying = false;
     std::optional<int64_t> previousBlockPosition;
     bool lastRetriggerParameter = false;
+    bool applyingProgramChange = false;
     uint32_t appliedSeed = 0;
-    std::atomic<int> editorWidth { 900 };
-    std::atomic<int> editorHeight { 610 };
+    std::atomic<std::uint64_t> packedEditorSize { (std::uint64_t { 900 } << 32) | std::uint64_t { 610 } };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ReverseLabAudioProcessor)
 };

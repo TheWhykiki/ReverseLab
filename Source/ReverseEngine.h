@@ -46,18 +46,28 @@ public:
     [[nodiscard]] bool isHoldingFrozenCapture() const noexcept { return frozenHold; }
     void advance() noexcept;
     void setSeed(uint32_t seed) noexcept;
+#if REVERSELAB_UNIT_TESTS
+    void setReadOffsetForTesting(int channel, double offset) noexcept
+    {
+        heads[(size_t) juce::jlimit(0, 1, channel)].readOffset = offset;
+    }
+    [[nodiscard]] double getReadOffsetForTesting(int channel) const noexcept
+    {
+        return heads[(size_t) juce::jlimit(0, 1, channel)].readOffset;
+    }
+#endif
 
 private:
     struct Head
     {
         float phase = 0.0f;
-        float readOffset = 0.0f;       // samples read back from segmentEnd (accumulated, speed-integrated)
-        float nextOffset = 0.0f;       // same for the incoming segment during the crossfade
+        double readOffset = 0.0;        // samples read back from segmentEnd (accumulated, speed-integrated)
+        double nextOffset = 0.0;        // same for the incoming segment during the crossfade
         float transitionPhase = 0.0f;  // samples elapsed since the crossfade started
         float lastRead = 0.0f;
         float nextLastRead = 0.0f;
-        float historyRemaining = 0.0f;
-        float nextHistoryRemaining = 0.0f;
+        double historyRemaining = 0.0;
+        double nextHistoryRemaining = 0.0;
         int segmentEnd = 0;
         int activeLength = 1;
         int nextEnd = 0;
@@ -70,10 +80,10 @@ private:
         float antiAliasState = 0.0f;
     };
 
-    float readInterpolated(int channel, float position) const noexcept;
-    float readCaptured(int channel, int end, float offset, float speed, bool mayOverwrite,
-                       float& remaining, float& lastRead, bool& exhausted) const noexcept;
-    float distanceFromWriter(float readPosition) const noexcept;
+    float readInterpolated(int channel, double position) const noexcept;
+    float readCaptured(int channel, int end, double offset, float speed, bool mayOverwrite,
+                       double& remaining, float& lastRead, bool& exhausted) const noexcept;
+    double distanceFromWriter(double readPosition) const noexcept;
     void beginSegment(int channel, int requestedLength, const EngineSettings&) noexcept;
     void prepareNextSegment(int channel, int requestedLength, const EngineSettings&) noexcept;
     float nextRandom() noexcept;

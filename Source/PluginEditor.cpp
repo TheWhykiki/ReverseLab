@@ -53,7 +53,9 @@ void ReverseLabLookAndFeel::drawRotarySlider(juce::Graphics& g, int x, int y, in
                                               float position, float start, float end, juce::Slider& slider)
 {
     const auto sizeControl = static_cast<bool>(slider.getProperties().getWithDefault(rl::ui::sizeControlProperty, false));
-    const auto bounds = juce::Rectangle<float>(x, y, w, h).reduced(sizeControl ? 8.0f : 7.0f);
+    const auto bounds = juce::Rectangle<float>(static_cast<float>(x), static_cast<float>(y),
+                                                static_cast<float>(w), static_cast<float>(h))
+                            .reduced(sizeControl ? 8.0f : 7.0f);
     const auto diameter = juce::jmin(bounds.getWidth(), bounds.getHeight());
     const auto circle = bounds.withSizeKeepingCentre(diameter, diameter);
     const auto radius = diameter * 0.5f;
@@ -169,6 +171,7 @@ ReverseLabAudioProcessorEditor::ReverseLabAudioProcessorEditor(ReverseLabAudioPr
     setResizeLimits(720, 460, 1440, 920);
     const auto savedSize = pluginProcessor.getLastEditorSize();
     setSize(savedSize.x, savedSize.y);
+    pluginProcessor.acknowledgeRestoredEditorSize(savedSize.x, savedSize.y);
     title.setText("ReverseLab", juce::dontSendNotification);
     title.setFont(juce::Font(juce::FontOptions(27.0f, juce::Font::bold)));
     title.setColour(juce::Label::textColourId, text);
@@ -304,19 +307,21 @@ void ReverseLabAudioProcessorEditor::paint(juce::Graphics& g)
 {
     g.fillAll(background);
     auto area = contentBounds(*this);
-    area.removeFromTop(juce::jlimit(42, 56, static_cast<int>(getHeight() * 0.09f)));
-    area.removeFromTop(juce::jlimit(92, 138, static_cast<int>(getHeight() * 0.22f)) + 7);
-    auto timing = area.removeFromTop(juce::jlimit(102, 150, static_cast<int>(getHeight() * 0.24f)));
+    area.removeFromTop(juce::jlimit(42, 56, static_cast<int>(static_cast<float>(getHeight()) * 0.09f)));
+    area.removeFromTop(juce::jlimit(92, 138, static_cast<int>(static_cast<float>(getHeight()) * 0.22f)) + 7);
+    auto timing = area.removeFromTop(juce::jlimit(102, 150, static_cast<int>(static_cast<float>(getHeight()) * 0.24f)));
     g.setColour(panel.withAlpha(0.82f)); g.fillRoundedRectangle(timing.toFloat(), 10.0f);
     g.setColour(border); g.drawRoundedRectangle(timing.toFloat().reduced(0.5f), 10.0f, 1.0f);
-    area.removeFromTop(7 + juce::jlimit(40, 52, static_cast<int>(getHeight() * 0.085f)) + 7);
+    area.removeFromTop(7 + juce::jlimit(40, 52, static_cast<int>(static_cast<float>(getHeight()) * 0.085f)) + 7);
     const std::array<std::pair<juce::String, float>, 4> groups {{
         { "MOTION", 0.22f }, { "MIX", 0.33f }, { "TONE", 0.22f }, { "STEREO", 0.23f }
     }};
     auto remaining = area;
     for (size_t i = 0; i < groups.size(); ++i)
     {
-        const auto width = i == groups.size() - 1 ? remaining.getWidth() : static_cast<int>(area.getWidth() * groups[i].second);
+        const auto width = i == groups.size() - 1
+            ? remaining.getWidth()
+            : static_cast<int>(static_cast<float>(area.getWidth()) * groups[i].second);
         auto group = remaining.removeFromLeft(width).reduced(2, 0);
         g.setColour(panel.withAlpha(0.82f)); g.fillRoundedRectangle(group.toFloat(), 9.0f);
         g.setColour(border); g.drawRoundedRectangle(group.toFloat().reduced(0.5f), 9.0f, 1.0f);
@@ -331,7 +336,7 @@ void ReverseLabAudioProcessorEditor::resized()
     pluginProcessor.setLastEditorSize(getWidth(), getHeight());
     auto area = contentBounds(*this);
     const auto compact = getWidth() < 820;
-    auto header = area.removeFromTop(juce::jlimit(42, 56, static_cast<int>(getHeight() * 0.09f)));
+    auto header = area.removeFromTop(juce::jlimit(42, 56, static_cast<int>(static_cast<float>(getHeight()) * 0.09f)));
     title.setBounds(header.removeFromLeft(compact ? 150 : 185));
     subtitle.setVisible(!compact);
     if (!compact) subtitle.setBounds(header.removeFromLeft(130).withTrimmedTop(5));
@@ -341,14 +346,14 @@ void ReverseLabAudioProcessorEditor::resized()
     sync.setBounds(header.removeFromRight(compact ? 58 : 66).reduced(2, 7));
     auto presetArea = header.reduced(4, 0);
     presetLabel.setBounds(presetArea.removeFromTop(15)); presetBox.setBounds(presetArea.removeFromTop(30));
-    scope.setBounds(area.removeFromTop(juce::jlimit(92, 138, static_cast<int>(getHeight() * 0.22f))));
+    scope.setBounds(area.removeFromTop(juce::jlimit(92, 138, static_cast<int>(static_cast<float>(getHeight()) * 0.22f))));
     area.removeFromTop(7);
-    auto timing = area.removeFromTop(juce::jlimit(102, 150, static_cast<int>(getHeight() * 0.24f))).reduced(8, 3);
+    auto timing = area.removeFromTop(juce::jlimit(102, 150, static_cast<int>(static_cast<float>(getHeight()) * 0.24f))).reduced(8, 3);
     auto left = timing.removeFromLeft(timing.getWidth() / 2).reduced(8, 0), right = timing.reduced(8, 0);
     leftSizeLabel.setBounds(left.removeFromTop(18)); leftSize.setBounds(left); leftFreeTime.setBounds(left);
     rightSizeLabel.setBounds(right.removeFromTop(18)); rightSize.setBounds(right); rightFreeTime.setBounds(right);
     area.removeFromTop(7);
-    auto performance = area.removeFromTop(juce::jlimit(40, 52, static_cast<int>(getHeight() * 0.085f)));
+    auto performance = area.removeFromTop(juce::jlimit(40, 52, static_cast<int>(static_cast<float>(getHeight()) * 0.085f)));
     freeze.setBounds(performance.removeFromLeft((performance.getWidth() - 6) / 2));
     performance.removeFromLeft(6); retrigger.setBounds(performance); area.removeFromTop(7);
     auto layoutGroup = [this](juce::Rectangle<int> group, std::initializer_list<int> indices)
@@ -364,15 +369,20 @@ void ReverseLabAudioProcessorEditor::resized()
         }
     };
     auto bottom = area;
-    auto motion = bottom.removeFromLeft(static_cast<int>(area.getWidth() * 0.22f));
-    auto mix = bottom.removeFromLeft(static_cast<int>(area.getWidth() * 0.33f));
-    auto tone = bottom.removeFromLeft(static_cast<int>(area.getWidth() * 0.22f));
+    auto motion = bottom.removeFromLeft(static_cast<int>(static_cast<float>(area.getWidth()) * 0.22f));
+    auto mix = bottom.removeFromLeft(static_cast<int>(static_cast<float>(area.getWidth()) * 0.33f));
+    auto tone = bottom.removeFromLeft(static_cast<int>(static_cast<float>(area.getWidth()) * 0.22f));
     layoutGroup(motion, { 0, 1 }); layoutGroup(mix, { 2, 3, 8 });
     layoutGroup(tone, { 4, 5 }); layoutGroup(bottom, { 6, 7, 9 });
 }
 
 void ReverseLabAudioProcessorEditor::timerCallback()
 {
+    const auto restoredSize = pluginProcessor.getLastEditorSize();
+    if (getWidth() != restoredSize.x || getHeight() != restoredSize.y)
+        setSize(restoredSize.x, restoredSize.y);
+    pluginProcessor.acknowledgeRestoredEditorSize(restoredSize.x, restoredSize.y);
+
     const auto programId = pluginProcessor.getCurrentProgram() + 1;
     if (presetBox.getSelectedId() != programId)
         presetBox.setSelectedId(programId, juce::dontSendNotification);

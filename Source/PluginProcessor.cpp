@@ -175,8 +175,9 @@ void ReverseLabAudioProcessor::queueLatencyUpdate(int samples) noexcept
 
 void ReverseLabAudioProcessor::timerCallback()
 {
-    if (programChangeRequested.exchange(false, std::memory_order_acq_rel))
-        applyPendingProgramChange();
+    if (const auto requestedProgram = pendingProgramRequest.exchange(-1, std::memory_order_acq_rel);
+        requestedProgram >= 0)
+        applyProgramChange(requestedProgram);
     const auto latency = pendingLatency.load();
     if (latency != getLatencySamples())
     {
@@ -466,20 +467,26 @@ void ReverseLabAudioProcessor::setPlainParameter(const char* id, float plainValu
 
 void ReverseLabAudioProcessor::setCurrentProgram(int index)
 {
-    pendingProgram.store(juce::jlimit(0, getNumPrograms() - 1, index), std::memory_order_release);
-    programChangeRequested.store(true, std::memory_order_release);
-    if (juce::MessageManager::getInstanceWithoutCreating() != nullptr
-        && juce::MessageManager::getInstanceWithoutCreating()->isThisTheMessageThread())
+    const auto program = juce::jlimit(0, getNumPrograms() - 1, index);
+    auto* messageManager = juce::MessageManager::getInstanceWithoutCreating();
+    const auto onMessageThread = messageManager != nullptr && messageManager->isThisTheMessageThread();
+    if (onMessageThread && applyingProgramChange
+        && program == currentProgram.load(std::memory_order_acquire))
+        return;
+
+    pendingProgramRequest.store(program, std::memory_order_release);
+    if (onMessageThread && ! applyingProgramChange)
     {
-        programChangeRequested.store(false, std::memory_order_release);
-        applyPendingProgramChange();
+        const auto requestedProgram = pendingProgramRequest.exchange(-1, std::memory_order_acq_rel);
+        if (requestedProgram >= 0)
+            applyProgramChange(requestedProgram);
     }
 }
 
-void ReverseLabAudioProcessor::applyPendingProgramChange()
+void ReverseLabAudioProcessor::applyProgramChange(int program)
 {
-    const auto program = pendingProgram.load(std::memory_order_acquire);
-    currentProgram.store(program, std::memory_order_release);
+    const juce::ScopedValueSetter<bool> applyingChange(applyingProgramChange, true);
+    const auto previousProgram = currentProgram.exchange(program, std::memory_order_acq_rel);
     setPlainParameter(rl::params::sync, 1.0f); setPlainParameter(rl::params::link, 1.0f);
     setPlainParameter(rl::params::leftSize, 8.0f); setPlainParameter(rl::params::rightSize, 8.0f);
     setPlainParameter(rl::params::leftFreeMs, 500.0f); setPlainParameter(rl::params::rightFreeMs, 500.0f);
@@ -503,14 +510,17 @@ void ReverseLabAudioProcessor::applyPendingProgramChange()
                 setPlainParameter(rl::params::rightSize, 10.0f); setPlainParameter(rl::params::stereoOffset, 62.0f); break;
         default: break;
     }
+    if (program != previousProgram)
+        updateHostDisplay(ChangeDetails().withProgramChanged(true));
 }
 
 void ReverseLabAudioProcessor::getStateInformation(juce::MemoryBlock& destination)
 {
     auto state = parameters.copyState();
+    const auto savedSize = getLastEditorSize();
     state.setProperty("program", currentProgram.load(std::memory_order_acquire), nullptr);
-    state.setProperty("editorWidth", editorWidth.load(std::memory_order_relaxed), nullptr);
-    state.setProperty("editorHeight", editorHeight.load(std::memory_order_relaxed), nullptr);
+    state.setProperty("editorWidth", savedSize.x, nullptr);
+    state.setProperty("editorHeight", savedSize.y, nullptr);
     if (auto xml = state.createXml()) copyXmlToBinary(*xml, destination);
 }
 
@@ -524,14 +534,22 @@ void ReverseLabAudioProcessor::setStateInformation(const void* data, int size)
             const auto restoredProgram = juce::jlimit(0, getNumPrograms() - 1,
                                                       static_cast<int>(state.getProperty("program", 0)));
             currentProgram.store(restoredProgram, std::memory_order_release);
-            pendingProgram.store(restoredProgram, std::memory_order_release);
-            programChangeRequested.store(false, std::memory_order_release);
-            editorWidth.store(juce::jlimit(720, 1440, static_cast<int>(state.getProperty("editorWidth", 900))),
-                              std::memory_order_relaxed);
-            editorHeight.store(juce::jlimit(460, 920, static_cast<int>(state.getProperty("editorHeight", 610))),
-                               std::memory_order_relaxed);
+            pendingProgramRequest.store(-1, std::memory_order_release);
+            const auto restoredWidth = juce::jlimit(
+                720, 1440, static_cast<int>(state.getProperty("editorWidth", 900)));
+            const auto restoredHeight = juce::jlimit(
+                460, 920, static_cast<int>(state.getProperty("editorHeight", 610)));
+            setRestoredEditorSize(restoredWidth, restoredHeight);
             parameters.replaceState(state);
             processingResetRequested.store(true, std::memory_order_release);
+            if (auto* messageManager = juce::MessageManager::getInstanceWithoutCreating();
+                messageManager != nullptr && messageManager->isThisTheMessageThread())
+                if (auto* editor = getActiveEditor())
+                {
+                    const auto restoredSize = getLastEditorSize();
+                    editor->setSize(restoredSize.x, restoredSize.y);
+                    acknowledgeRestoredEditorSize(restoredSize.x, restoredSize.y);
+                }
         }
     }
 }

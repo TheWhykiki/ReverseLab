@@ -1,9 +1,13 @@
 #include <juce_core/juce_core.h>
+#include "PluginEditor.h"
 #include "PluginProcessor.h"
 #include "ReverseEngine.h"
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <limits>
+#include <thread>
+#include <vector>
 
 namespace
 {
@@ -18,6 +22,47 @@ class TestPlayHead final : public juce::AudioPlayHead
 public:
     juce::Optional<PositionInfo> getPosition() const override { return position; }
     PositionInfo position;
+};
+
+struct EchoingProgramHost final : juce::AudioProcessorListener
+{
+    explicit EchoingProgramHost(ReverseLabAudioProcessor& processorIn) : processor(processorIn) {}
+
+    void audioProcessorParameterChanged(juce::AudioProcessor*, int, float) override
+    {
+        ++parameterNotifications;
+    }
+
+    void audioProcessorChanged(juce::AudioProcessor*, const ChangeDetails& details) override
+    {
+        if (! details.programChanged)
+            return;
+        ++programNotifications;
+        processor.setCurrentProgram(processor.getCurrentProgram());
+    }
+
+    ReverseLabAudioProcessor& processor;
+    int programNotifications = 0;
+    int parameterNotifications = 0;
+};
+
+struct CascadingProgramHost final : juce::AudioProcessorListener
+{
+    explicit CascadingProgramHost(ReverseLabAudioProcessor& processorIn) : processor(processorIn) {}
+
+    void audioProcessorParameterChanged(juce::AudioProcessor*, int, float) override {}
+
+    void audioProcessorChanged(juce::AudioProcessor*, const ChangeDetails& details) override
+    {
+        if (! details.programChanged)
+            return;
+        programs.push_back(processor.getCurrentProgram());
+        if (programs.size() == 1)
+            processor.setCurrentProgram(2);
+    }
+
+    ReverseLabAudioProcessor& processor;
+    std::vector<int> programs;
 };
 
 // Click detector: tracks the largest sample-to-sample step of a signal. For a sine of amplitude A and
@@ -74,6 +119,25 @@ public:
         for (int i = 130; i < 190; ++i)
             if (output[(size_t) i] < output[(size_t) (i - 1)]) ++descending;
         expect(descending > 50, "Most samples in a complete reverse segment should descend");
+
+        beginTest("Fractional speed keeps precision at long read offsets");
+        {
+            rl::ReverseEngine precisionEngine;
+            precisionEngine.prepare(48000.0, 48000);
+            rl::EngineSettings precisionSettings;
+            precisionSettings.leftLength = precisionSettings.rightLength = 64;
+            precisionSettings.speed = 1.37f;
+            (void) precisionEngine.processSample(0, 0.0f, precisionSettings);
+            (void) precisionEngine.processSample(1, 0.0f, precisionSettings);
+            precisionEngine.advance();
+
+            constexpr double longOffset = 2097152.0; // float ULP is 0.25 samples here
+            precisionEngine.setReadOffsetForTesting(0, longOffset);
+            (void) precisionEngine.processSample(0, 0.0f, precisionSettings);
+            const auto advanced = precisionEngine.getReadOffsetForTesting(0) - longOffset;
+            expect(std::abs(advanced - static_cast<double>(precisionSettings.speed)) < 1.0e-9,
+                   "The accumulated read offset must advance by the requested fractional speed");
+        }
 
         beginTest("Freeze stops replacing the captured material");
         engine.reset();
@@ -351,15 +415,25 @@ public:
 
         beginTest("Factory programs are applied by the message-thread service");
         ReverseLabAudioProcessor presetProcessor;
+        EchoingProgramHost programHost(presetProcessor);
+        presetProcessor.addListener(&programHost);
         presetProcessor.setCurrentProgram(3);
+        const auto parameterNotificationsAfterChange = programHost.parameterNotifications;
+        expectGreaterThan(parameterNotificationsAfterChange, 0,
+                          "The first factory-program application must exercise parameter notifications");
         presetProcessor.servicePendingHostUpdatesForTesting();
         expectEquals(presetProcessor.getCurrentProgram(), 3);
+        expectEquals(programHost.programNotifications, 1,
+                     "A changed factory program must be reported exactly once even when the host echoes it");
+        expectEquals(programHost.parameterNotifications, parameterNotificationsAfterChange,
+                     "A host echo must not apply the same factory program a second time");
         expectWithinAbsoluteError(presetProcessor.parameters.getRawParameterValue(rl::params::feedback)->load(),
                                   72.0f, 0.001f);
         expectWithinAbsoluteError(presetProcessor.parameters.getRawParameterValue(rl::params::bypass)->load(),
                                   0.0f, 0.001f);
         presetProcessor.setCurrentProgram(2);
         presetProcessor.servicePendingHostUpdatesForTesting();
+        expectEquals(programHost.programNotifications, 2);
         expectWithinAbsoluteError(presetProcessor.parameters.getRawParameterValue(rl::params::freeze)->load(),
                                   1.0f, 0.001f);
         expectWithinAbsoluteError(presetProcessor.parameters.getRawParameterValue(rl::params::feedback)->load(),
@@ -367,6 +441,24 @@ public:
                                   "Frozen Texture must not advertise inaudible feedback");
         expect(presetProcessor.getProgramName(-1).isEmpty());
         expect(presetProcessor.getProgramName(presetProcessor.getNumPrograms()).isEmpty());
+        presetProcessor.removeListener(&programHost);
+
+        beginTest("A different reentrant host program request is applied once on the next service tick");
+        ReverseLabAudioProcessor cascadingProcessor;
+        CascadingProgramHost cascadingHost(cascadingProcessor);
+        cascadingProcessor.addListener(&cascadingHost);
+        cascadingProcessor.setCurrentProgram(3);
+        expectEquals(cascadingProcessor.getCurrentProgram(), 3);
+        cascadingProcessor.servicePendingHostUpdatesForTesting();
+        cascadingProcessor.servicePendingHostUpdatesForTesting();
+        expectEquals(cascadingProcessor.getCurrentProgram(), 2);
+        expectEquals(static_cast<int>(cascadingHost.programs.size()), 2);
+        if (cascadingHost.programs.size() == 2)
+        {
+            expectEquals(cascadingHost.programs[0], 3);
+            expectEquals(cascadingHost.programs[1], 2);
+        }
+        cascadingProcessor.removeListener(&cascadingHost);
 
         beginTest("Internal bypass returns the latency-aligned dry signal");
         setParameter(processor, rl::params::bypass, 1.0f);
@@ -402,6 +494,103 @@ public:
         expectEquals(restored.getLastEditorSize().x, 1234);
         expectEquals(restored.getLastEditorSize().y, 777);
         expectEquals(restored.getLatencySamples(), 6600);
+
+        beginTest("Editor size snapshots stay coherent across threads");
+        ReverseLabAudioProcessor coherentSize;
+        coherentSize.setLastEditorSize(720, 460);
+        std::atomic<bool> startSizeWriters { false };
+        std::atomic<bool> stopSizeWriters { false };
+        std::atomic<int> writersWithFirstStore { 0 };
+        const auto writeSize = [&](int width, int height)
+        {
+            while (! startSizeWriters.load(std::memory_order_acquire))
+                std::this_thread::yield();
+            coherentSize.setLastEditorSize(width, height);
+            writersWithFirstStore.fetch_add(1, std::memory_order_release);
+            while (! stopSizeWriters.load(std::memory_order_acquire))
+                coherentSize.setLastEditorSize(width, height);
+        };
+        std::thread smallSizeWriter(writeSize, 720, 460);
+        std::thread largeSizeWriter(writeSize, 1440, 920);
+        startSizeWriters.store(true, std::memory_order_release);
+        while (writersWithFirstStore.load(std::memory_order_acquire) != 2)
+            std::this_thread::yield();
+        for (int read = 0; read < 100000; ++read)
+        {
+            const auto size = coherentSize.getLastEditorSize();
+            expect((size.x == 720 && size.y == 460) || (size.x == 1440 && size.y == 920),
+                   "Width and height must come from the same published snapshot");
+        }
+        stopSizeWriters.store(true, std::memory_order_release);
+        smallSizeWriter.join();
+        largeSizeWriter.join();
+
+        beginTest("An open editor immediately adopts restored dimensions");
+        ReverseLabAudioProcessor visibleRestore;
+        if (auto* editor = visibleRestore.createEditorAndMakeActive())
+        {
+            visibleRestore.setStateInformation(state.getData(), static_cast<int>(state.getSize()));
+            expectEquals(editor->getWidth(), 1234,
+                         "An open editor must immediately adopt the restored width");
+            expectEquals(editor->getHeight(), 777,
+                         "An open editor must immediately adopt the restored height");
+            visibleRestore.editorBeingDeleted(editor);
+            delete editor;
+        }
+        else
+        {
+            expect(false, "The processor must create its editor for the state-restore test");
+        }
+
+        beginTest("An open editor adopts dimensions restored from a worker thread on its timer");
+        ReverseLabAudioProcessor backgroundRestore;
+        if (auto* editor = dynamic_cast<ReverseLabAudioProcessorEditor*>(
+                backgroundRestore.createEditorAndMakeActive()))
+        {
+            std::thread restoreWorker([&]
+            {
+                backgroundRestore.setStateInformation(state.getData(), static_cast<int>(state.getSize()));
+            });
+            restoreWorker.join();
+            editor->serviceTimerForTesting();
+            expectEquals(editor->getWidth(), 1234);
+            expectEquals(editor->getHeight(), 777);
+            backgroundRestore.editorBeingDeleted(editor);
+            delete editor;
+        }
+        else
+        {
+            expect(false, "The processor must create its editor for the background-restore test");
+        }
+
+        beginTest("A pending worker-thread size restore survives closing and reopening the editor");
+        ReverseLabAudioProcessor closeBeforeRestoreTick;
+        if (auto* editor = closeBeforeRestoreTick.createEditorAndMakeActive())
+        {
+            std::thread restoreWorker([&]
+            {
+                closeBeforeRestoreTick.setStateInformation(state.getData(), static_cast<int>(state.getSize()));
+            });
+            restoreWorker.join();
+            closeBeforeRestoreTick.editorBeingDeleted(editor);
+            delete editor;
+
+            if (auto* reopenedEditor = closeBeforeRestoreTick.createEditorAndMakeActive())
+            {
+                expectEquals(reopenedEditor->getWidth(), 1234);
+                expectEquals(reopenedEditor->getHeight(), 777);
+                closeBeforeRestoreTick.editorBeingDeleted(reopenedEditor);
+                delete reopenedEditor;
+            }
+            else
+            {
+                expect(false, "The processor must reopen its editor after a background restore");
+            }
+        }
+        else
+        {
+            expect(false, "The processor must create its editor for the close-before-tick test");
+        }
 
         beginTest("A restored Freeze state captures fresh material instead of remaining silent");
         {

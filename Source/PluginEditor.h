@@ -37,6 +37,9 @@ public:
     ~ReverseLabAudioProcessorEditor() override;
     void paint(juce::Graphics&) override;
     void resized() override;
+#if REVERSELAB_UNIT_TESTS
+    void serviceTimerForTesting() { timerCallback(); }
+#endif
 
 private:
     using SliderAttachment = juce::AudioProcessorValueTreeState::SliderAttachment;

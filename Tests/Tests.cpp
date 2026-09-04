@@ -780,7 +780,8 @@ public:
             playHead.position.setTimeInSamples(64LL * (i + 2));
         }
         expectEquals(meterAware.getCurrentLatencySamples(), 120000);
-        expectWithinAbsoluteError(meterAware.getTailLengthSeconds(), 2.5, 0.01);
+        // Tail includes reverse read age and output alignment, not just one bar's duration.
+        expectWithinAbsoluteError(meterAware.getTailLengthSeconds(), 7.6, 0.01);
         meterAware.setPlayHead(nullptr);
 
         beginTest("Unlinked left and right times produce distinct stereo output");
@@ -1032,8 +1033,406 @@ public:
     }
 };
 
+class AcceptanceRegressionTests final : public juce::UnitTest
+{
+public:
+    AcceptanceRegressionTests() : UnitTest("Acceptance regressions", "Integration") {}
+
+    void runTest() override
+    {
+        beginTest("Feedback decays across crossfade, speed, length and history-offset extremes");
+        {
+            int cases = 0;
+            float worstTailPeak = 0.0f;
+            for (const auto length : { 64, 960 })
+                for (const auto speed : { 0.25f, 1.0f, 4.0f })
+                    for (const auto crossfade : { 0.0f, 0.04f, 0.25f })
+                        for (const auto feedback : { 0.72f, 0.95f })
+                            for (const auto modulated : { false, true })
+                            {
+                                rl::ReverseEngine engine;
+                                const auto capacity = juce::jmax(4096, length * 8 + 8);
+                                engine.prepare(48000.0, length * 8);
+                                rl::EngineSettings settings;
+                                settings.leftLength = length;
+                                settings.rightLength = juce::jmax(16, length / 2);
+                                settings.speed = speed;
+                                settings.crossfade = crossfade;
+                                settings.feedback = feedback;
+                                settings.randomAmount = modulated ? 1.0f : 0.0f;
+                                settings.stereoOffset = modulated ? 1.0f : 0.0f;
+                                const auto repeats = static_cast<int>(std::ceil(std::log(0.0001) / std::log(feedback)));
+                                const auto burst = capacity * 2; // fill the ring before testing wrapped history
+                                const auto end = burst + (capacity + length + 64) * (repeats + 1) + length;
+                                bool finite = true;
+                                float peak = 0.0f, tailPeak = 0.0f, burstPeak = 0.0f;
+                                for (int i = 0; i < end; ++i)
+                                {
+                                    const auto input = i < burst ? 0.075f * std::sin(static_cast<float>(i) * 0.317f) + 0.025f : 0.0f;
+                                    for (int channel = 0; channel < 2; ++channel)
+                                    {
+                                        const auto wet = engine.processSample(channel, channel == 0 ? input : -input, settings);
+                                        finite = finite && std::isfinite(wet);
+                                        peak = juce::jmax(peak, std::abs(wet));
+                                        if (i < burst) burstPeak = juce::jmax(burstPeak, std::abs(wet));
+                                        if (i >= end - length) tailPeak = juce::jmax(tailPeak, std::abs(wet));
+                                    }
+                                    engine.advance();
+                                }
+                                const auto label = "length=" + juce::String(length) + " speed=" + juce::String(speed)
+                                    + " crossfade=" + juce::String(crossfade) + " feedback=" + juce::String(feedback)
+                                    + " offset/random=" + juce::String(modulated ? 1 : 0);
+                                expect(finite, label);
+                                expectGreaterThan(burstPeak, 0.001f, "Non-vacuous capture: " + label);
+                                // Convex feedback cannot exceed inputPeak/(1-feedback). The audible
+                                // cubic/equal-power path has at most 1.25*sqrt(2) times that bound.
+                                expectLessThan(peak, 0.1f / (1.0f - feedback) * 1.78f, "Feedback gain bound: " + label);
+                                expectLessThan(tailPeak, 0.001f, "Silent-input decay: " + label);
+                                worstTailPeak = juce::jmax(worstTailPeak, tailPeak);
+                                ++cases;
+                            }
+            logMessage("  feedback matrix cases=" + juce::String(cases)
+                       + "; worst final peak=" + juce::String(worstTailPeak, 9));
+        }
+
+        beginTest("A quiet sine burst decays by the reported feedback tail");
+        {
+            ReverseLabAudioProcessor processor;
+            setParameter(processor, rl::params::sync, 0.0f);
+            setParameter(processor, rl::params::leftFreeMs, 20.0f);
+            setParameter(processor, rl::params::feedback, 95.0f);
+            setParameter(processor, rl::params::crossfade, 4.0f);
+            processor.prepareToPlay(48000.0, 64);
+            const auto reportedTail = processor.getTailLengthSeconds();
+            const auto end = static_cast<int>(std::ceil(48000.0 * juce::jmax(10.0, 1.1 + reportedTail)));
+            double finalEnergy = 0.0;
+            float finalPeak = 0.0f;
+            int finalSamples = 0;
+            bool finite = true;
+            juce::MidiBuffer midi;
+            for (int start = 0; start < end; start += 64)
+            {
+                const auto count = juce::jmin(64, end - start);
+                juce::AudioBuffer<float> block(2, count);
+                for (int i = 0; i < count; ++i)
+                {
+                    const auto t = start + i;
+                    const auto input = t < 48000 ? 0.1f * std::sin(
+                        juce::MathConstants<float>::twoPi * 440.0f * static_cast<float>(t) / 48000.0f) : 0.0f;
+                    block.setSample(0, i, input); block.setSample(1, i, input);
+                }
+                processor.processBlock(block, midi);
+                for (int i = 0; i < count; ++i)
+                {
+                    for (int channel = 0; channel < 2; ++channel)
+                        finite = std::isfinite(block.getSample(channel, i)) && finite;
+                    if (start + i >= end - 4800)
+                    {
+                        const auto value = block.getSample(0, i);
+                        finalEnergy += value * value;
+                        finalPeak = juce::jmax(finalPeak, std::abs(value));
+                        ++finalSamples;
+                    }
+                }
+            }
+            const auto rms = std::sqrt(finalEnergy / static_cast<double>(finalSamples));
+            logMessage("  reported tail=" + juce::String(reportedTail) + " s; final RMS="
+                       + juce::String(rms, 9) + "; final peak=" + juce::String(finalPeak, 9));
+            expect(finite, "Every rendered sample must be finite before peak/RMS reduction");
+            expectLessThan(rms, 0.001, "Feedback below unity must decay after the input becomes silent");
+            expectLessThan(finalPeak, 0.003f, "The reported tail must not leave a loud sustained output");
+        }
+
+        beginTest("Continuous transport is invariant to decreasing and empty block sizes");
+        {
+            ReverseLabAudioProcessor timed, reference;
+            TestPlayHead timedHead, referenceHead;
+            for (auto* p : { &timed, &reference })
+            {
+                setParameter(*p, rl::params::sync, 0.0f);
+                setParameter(*p, rl::params::leftFreeMs, 200.0f);
+                setParameter(*p, rl::params::crossfade, 0.0f);
+            }
+            timedHead.position.setIsPlaying(true); referenceHead.position.setIsPlaying(true);
+            timedHead.position.setBpm(120.0); referenceHead.position.setBpm(120.0);
+            timedHead.position.setTimeInSamples(0);
+            timed.setPlayHead(&timedHead); reference.setPlayHead(&referenceHead);
+            timed.prepareToPlay(48000.0, 2048); reference.prepareToPlay(48000.0, 2048);
+            int64_t position = 0;
+            float maxDifference = 0.0f;
+            bool finite = true;
+            juce::MidiBuffer midi;
+            for (int b = 0; b < 60; ++b)
+            {
+                const std::array<int, 6> varying { 2048, 32, 0, 17, 256, 64 };
+                const auto count = b < 15 ? 2048 : varying[static_cast<size_t>(b) % varying.size()];
+                juce::AudioBuffer<float> actual(2, count), expected(2, count);
+                for (int i = 0; i < count; ++i)
+                    for (int channel = 0; channel < 2; ++channel)
+                    {
+                        const auto input = 0.25f * std::sin(static_cast<float>(position + i) * 0.01f) + 0.25f;
+                        actual.setSample(channel, i, input); expected.setSample(channel, i, input);
+                    }
+                timedHead.position.setTimeInSamples(position);
+                timed.processBlock(actual, midi); reference.processBlock(expected, midi);
+                for (int i = 0; i < count; ++i)
+                {
+                    for (int channel = 0; channel < 2; ++channel)
+                        finite = std::isfinite(actual.getSample(channel, i))
+                                 && std::isfinite(expected.getSample(channel, i)) && finite;
+                    maxDifference = juce::jmax(maxDifference,
+                        std::abs(actual.getSample(0, i) - expected.getSample(0, i)));
+                }
+                position += count;
+            }
+            logMessage("  variable-block/reference maximum difference=" + juce::String(maxDifference, 9));
+            expect(finite);
+            expectLessThan(maxDifference, 1.0e-6f,
+                           "Valid smaller blocks must not reset captured audio or aligned delay lines");
+            timed.setPlayHead(nullptr); reference.setPlayHead(nullptr);
+        }
+
+        beginTest("A variably partitioned stream matches a fixed 64-sample transport reference");
+        {
+            constexpr int total = 48000;
+            std::array<std::vector<float>, 2> rendered;
+            bool finite = true;
+            for (size_t pass = 0; pass < rendered.size(); ++pass)
+            {
+                ReverseLabAudioProcessor processor;
+                TestPlayHead head;
+                head.position.setIsPlaying(true); head.position.setBpm(120.0);
+                head.position.setTimeInSamples(0);
+                processor.setPlayHead(&head);
+                setParameter(processor, rl::params::sync, 0.0f);
+                setParameter(processor, rl::params::leftFreeMs, 200.0f);
+                processor.prepareToPlay(48000.0, 2048);
+                rendered[pass].reserve(total * 2);
+                int position = 0;
+                size_t blockIndex = 0;
+                juce::MidiBuffer midi;
+                while (position < total)
+                {
+                    const std::array<int, 6> sizes { 2048, 32, 0, 17, 256, 64 };
+                    const auto requested = pass == 0 ? sizes[blockIndex++ % sizes.size()] : 64;
+                    const auto count = juce::jmin(requested, total - position);
+                    juce::AudioBuffer<float> block(2, count);
+                    for (int i = 0; i < count; ++i)
+                        for (int channel = 0; channel < 2; ++channel)
+                            block.setSample(channel, i, 0.2f * std::sin(static_cast<float>(position + i)
+                                                                      * (channel == 0 ? 0.017f : 0.029f)));
+                    head.position.setTimeInSamples(position);
+                    processor.processBlock(block, midi);
+                    for (int i = 0; i < count; ++i)
+                        for (int channel = 0; channel < 2; ++channel)
+                        {
+                            const auto value = block.getSample(channel, i);
+                            finite = std::isfinite(value) && finite;
+                            rendered[pass].push_back(value);
+                        }
+                    position += count;
+                }
+                processor.setPlayHead(nullptr);
+            }
+            expect(finite);
+            expectEquals(static_cast<int>(rendered[0].size()), total * 2);
+            expectEquals(static_cast<int>(rendered[1].size()), total * 2);
+            float maxDifference = 0.0f;
+            for (size_t i = 0; i < rendered[0].size(); ++i)
+                maxDifference = juce::jmax(maxDifference, std::abs(rendered[0][i] - rendered[1][i]));
+            logMessage("  variable/fixed64 maximum difference=" + juce::String(maxDifference, 9));
+            expectLessThan(maxDifference, 1.0e-6f);
+        }
+
+        beginTest("Reported tails cover slow and fast reverse playback, not only unity speed");
+        {
+            for (const auto lengthMs : { 20.0f, 75.0f })
+                for (const auto speed : { 0.25f, 1.0f, 4.0f })
+                {
+                    ReverseLabAudioProcessor processor;
+                    setParameter(processor, rl::params::sync, 0.0f);
+                    setParameter(processor, rl::params::leftFreeMs, lengthMs);
+                    setParameter(processor, rl::params::speed, speed);
+                    setParameter(processor, rl::params::crossfade, 25.0f);
+                    setParameter(processor, rl::params::feedback, 95.0f);
+                    processor.prepareToPlay(48000.0, 256);
+                    const auto tail = processor.getTailLengthSeconds();
+                    const auto burst = 24000;
+                    const auto end = burst + static_cast<int>(std::ceil(tail * 48000.0)) + 256;
+                    juce::MidiBuffer midi;
+                    float afterTailPeak = 0.0f;
+                    bool finite = true;
+                    for (int start = 0; start < end; start += 256)
+                    {
+                        const auto count = juce::jmin(256, end - start);
+                        juce::AudioBuffer<float> block(2, count);
+                        for (int i = 0; i < count; ++i)
+                        {
+                            const auto t = start + i;
+                            const auto input = t < burst ? 0.05f * std::sin(static_cast<float>(t) * 0.137f) + 0.05f : 0.0f;
+                            block.setSample(0, i, input); block.setSample(1, i, -input);
+                        }
+                        processor.processBlock(block, midi);
+                        for (int i = 0; i < count; ++i)
+                        {
+                            for (int channel = 0; channel < 2; ++channel)
+                                finite = std::isfinite(block.getSample(channel, i)) && finite;
+                            if (start >= end - 512)
+                                afterTailPeak = juce::jmax(afterTailPeak, std::abs(block.getSample(0, i)));
+                        }
+                    }
+                    logMessage("  length=" + juce::String(lengthMs) + " ms; speed=" + juce::String(speed)
+                               + "; reported tail=" + juce::String(tail) + "; final peak=" + juce::String(afterTailPeak, 9));
+                    expect(finite);
+                    expectLessThan(afterTailPeak, 0.001f);
+                }
+        }
+
+        beginTest("Frozen processor output stays input-independent through tempo and length automation");
+        {
+            ReverseLabAudioProcessor a, b;
+            TestPlayHead head;
+            head.position.setIsPlaying(true); head.position.setBpm(120.0);
+            for (auto* p : { &a, &b })
+            {
+                setParameter(*p, rl::params::leftSize, 0.0f);
+                setParameter(*p, rl::params::freeze, 1.0f);
+                p->setPlayHead(&head); p->prepareToPlay(48000.0, 64);
+            }
+            float maximumDifference = 0.0f;
+            double captureEnergy = 0.0;
+            bool finite = true;
+            juce::MidiBuffer midi;
+            for (int n = 0; n < 800; ++n)
+            {
+                head.position.setTimeInSamples(static_cast<int64_t>(n) * 64);
+                head.position.setBpm(n < 200 ? 120.0 : n < 400 ? 60.0 : n < 600 ? 90.0 : 180.0);
+                if (n == 300 || n == 500)
+                    for (auto* p : { &a, &b })
+                        setParameter(*p, rl::params::leftSize, n == 300 ? 5.0f : 2.0f);
+                juce::AudioBuffer<float> x(2, 64), y(2, 64);
+                for (int i = 0; i < 64; ++i)
+                    for (int channel = 0; channel < 2; ++channel)
+                    {
+                        const auto original = 0.2f * std::sin(static_cast<float>(n * 64 + i) * 0.05f);
+                        x.setSample(channel, i, n < 150 ? original : 0.0f);
+                        y.setSample(channel, i, n < 150 ? original : -0.5f);
+                    }
+                a.processBlock(x, midi); b.processBlock(y, midi);
+                a.servicePendingHostUpdatesForTesting(); b.servicePendingHostUpdatesForTesting();
+                for (int i = 0; i < 64; ++i)
+                {
+                    for (int channel = 0; channel < 2; ++channel)
+                        finite = std::isfinite(x.getSample(channel, i)) && std::isfinite(y.getSample(channel, i)) && finite;
+                    if (n >= 150)
+                        maximumDifference = juce::jmax(maximumDifference, std::abs(x.getSample(0, i) - y.getSample(0, i)));
+                    else
+                        captureEnergy += x.getSample(0, i) * x.getSample(0, i);
+                }
+            }
+            expect(finite);
+            expectGreaterThan(captureEnergy, 1.0);
+            expectLessThan(maximumDifference, 1.0e-6f);
+            a.setPlayHead(nullptr); b.setPlayHead(nullptr);
+        }
+
+        beginTest("Maximum feedback tail is finite and not silently capped below its history bound");
+        {
+            for (const auto sampleRate : { 44100.0, 48000.0, 88200.0, 96000.0, 192000.0 })
+            {
+                ReverseLabAudioProcessor processor;
+                TestPlayHead head;
+                head.position.setBpm(20.0);
+                head.position.setTimeSignature(juce::AudioPlayHead::TimeSignature { 4, 4 });
+                processor.setPlayHead(&head);
+                setParameter(processor, rl::params::leftSize, 14.0f);
+                setParameter(processor, rl::params::feedback, 95.0f);
+                setParameter(processor, rl::params::speed, 4.0f);
+                setParameter(processor, rl::params::stereoOffset, 100.0f);
+                setParameter(processor, rl::params::random, 100.0f);
+                processor.prepareToPlay(sampleRate, 256);
+                const auto tail = processor.getTailLengthSeconds();
+                expect(std::isfinite(tail));
+                expectWithinAbsoluteError(tail, 5808.281 + 2896.0 / sampleRate, 0.001);
+                logMessage("  maximum tail at " + juce::String(sampleRate) + " Hz=" + juce::String(tail, 6) + " s");
+                processor.setPlayHead(nullptr);
+            }
+        }
+
+        beginTest("An engaged Freeze cannot recapture when requested lengths increase");
+        {
+            rl::ReverseEngine left, right;
+            left.prepare(48000.0, 48000); right.prepare(48000.0, 48000);
+            rl::EngineSettings settings;
+            settings.leftLength = settings.rightLength = 9600;
+            settings.freeze = true;
+            bool finite = true;
+            for (int i = 0; i < 20000; ++i)
+            {
+                const auto input = 0.2f * std::sin(static_cast<float>(i) * 0.09f);
+                for (auto* engine : { &left, &right })
+                {
+                    const auto wetLeft = engine->processSample(0, input, settings);
+                    const auto wetRight = engine->processSample(1, input, settings);
+                    finite = std::isfinite(wetLeft) && std::isfinite(wetRight) && finite;
+                    engine->advance();
+                }
+            }
+            expect(left.isHoldingFrozenCapture());
+            const auto heldWriter = left.getWritePosition();
+            bool heldThroughout = true;
+            float maxDifference = 0.0f;
+            for (int i = 0; i < 48000 * 8; ++i) // eight complete ring durations, with writing stopped
+            {
+                // The same length changes represent manual/free-time automation or slower host tempo.
+                settings.leftLength = i < 20000 ? 19200 : 24000;
+                settings.rightLength = i < 20000 ? 14400 : 12000;
+                const auto a = left.processSample(0, 0.0f, settings);
+                const auto b = right.processSample(0, -0.5f, settings);
+                const auto aRight = left.processSample(1, 0.0f, settings);
+                const auto bRight = right.processSample(1, 0.5f, settings);
+                finite = std::isfinite(a) && std::isfinite(b)
+                         && std::isfinite(aRight) && std::isfinite(bRight) && finite;
+                left.advance(); right.advance();
+                heldThroughout = heldThroughout && left.isHoldingFrozenCapture()
+                                && left.getWritePosition() == heldWriter;
+                maxDifference = juce::jmax(maxDifference, std::abs(a - b));
+            }
+            logMessage("  frozen input-independence maximum difference=" + juce::String(maxDifference, 9));
+            expect(finite);
+            expect(heldThroughout, "Freeze must remain latched until Freeze is disabled or explicitly reset");
+            expectLessThan(maxDifference, 1.0e-6f, "Length changes must not admit new input into a held capture");
+            settings.freeze = false;
+            const auto unfreezeLeft = left.processSample(0, 0.1f, settings);
+            const auto unfreezeRight = left.processSample(1, 0.1f, settings);
+            finite = std::isfinite(unfreezeLeft) && std::isfinite(unfreezeRight) && finite;
+            left.advance();
+            expect(!left.isHoldingFrozenCapture());
+            expect(left.getWritePosition() != heldWriter, "Explicit Unfreeze must resume capture");
+            float resumedMinimum = 10.0f, resumedMaximum = -10.0f;
+            for (int i = 0; i < 96000; ++i)
+            {
+                const auto input = 0.2f * std::sin(static_cast<float>(i) * 0.04f);
+                const auto output = left.processSample(0, input, settings);
+                const auto other = left.processSample(1, input, settings);
+                finite = std::isfinite(output) && std::isfinite(other) && finite;
+                left.advance();
+                if (i >= 72000)
+                {
+                    resumedMinimum = juce::jmin(resumedMinimum, output);
+                    resumedMaximum = juce::jmax(resumedMaximum, output);
+                }
+            }
+            expect(finite);
+            expectGreaterThan(resumedMaximum - resumedMinimum, 0.1f,
+                              "After a long Freeze, Unfreeze must resume changing, newly captured audio");
+        }
+    }
+};
+
 static ReverseEngineTests reverseEngineTests;
 static ProcessorTests processorTests;
+static AcceptanceRegressionTests acceptanceRegressionTests;
 
 int main()
 {

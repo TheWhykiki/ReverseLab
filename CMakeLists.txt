@@ -78,6 +78,33 @@ target_link_libraries(ReverseLabTests PRIVATE
 enable_testing()
 add_test(NAME ReverseLabDSP COMMAND ReverseLabTests)
 
+juce_add_console_app(ReverseLabParameterTextTests PRODUCT_NAME "ReverseLab Parameter Text Tests")
+target_sources(ReverseLabParameterTextTests PRIVATE Tests/ParameterTextTests.cpp)
+target_include_directories(ReverseLabParameterTextTests PRIVATE Source)
+target_compile_definitions(ReverseLabParameterTextTests PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0)
+target_link_libraries(ReverseLabParameterTextTests PRIVATE juce::juce_audio_processors
+    PUBLIC juce::juce_recommended_config_flags juce::juce_recommended_warning_flags)
+add_test(NAME ReverseLabParameterTextRoundtrip COMMAND ReverseLabParameterTextTests)
+
+if(APPLE)
+    juce_add_console_app(ReverseLabHostTests PRODUCT_NAME "ReverseLab VST3 Host Tests")
+    target_sources(ReverseLabHostTests PRIVATE Tests/HostTest.cpp)
+    target_compile_definitions(ReverseLabHostTests PRIVATE
+        JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_PLUGINHOST_VST3=1)
+    target_link_libraries(ReverseLabHostTests PRIVATE juce::juce_audio_utils
+        PUBLIC juce::juce_recommended_config_flags juce::juce_recommended_warning_flags)
+    add_dependencies(ReverseLabHostTests ReverseLab_VST3)
+    add_test(NAME ReverseLabBundleLoad COMMAND ReverseLabHostTests
+        "${CMAKE_BINARY_DIR}/ReverseLab_artefacts/$<CONFIG>/VST3/ReverseLab.vst3")
+endif()
+
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+add_test(NAME ReverseLabReleasePipeline COMMAND "${Python3_EXECUTABLE}" -B -m unittest discover
+    -s "${CMAKE_CURRENT_SOURCE_DIR}/scripts/tests" -p "test_release_pipeline.py")
+add_test(NAME ReverseLabAcceptanceValidators COMMAND "${Python3_EXECUTABLE}" -B -m unittest -v test_analyse_host_audio)
+set_tests_properties(ReverseLabAcceptanceValidators PROPERTIES
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/scripts/acceptance")
+
 juce_add_console_app(ReverseLabRenderAB PRODUCT_NAME "ReverseLab A-B Renderer")
 target_sources(ReverseLabRenderAB PRIVATE
     Tests/RenderAB.cpp

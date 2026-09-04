@@ -281,16 +281,7 @@ void ReverseLabAudioProcessorEditor::configureKnob(Knob& knob, const juce::Strin
     knob.label.setFont(juce::Font(juce::FontOptions(9.5f, juce::Font::bold)));
     knob.label.setJustificationType(juce::Justification::centred);
     knob.attachment = std::make_unique<SliderAttachment>(pluginProcessor.parameters, id, knob.slider);
-    if (juce::String(id) == rl::params::highpass)
-        knob.slider.textFromValueFunction = [](double value)
-        {
-            return value <= 20.01 ? juce::String("Off") : juce::String(value, 0) + " Hz";
-        };
-    else if (juce::String(id) == rl::params::lowpass)
-        knob.slider.textFromValueFunction = [](double value)
-        {
-            return value >= 19999.0 ? juce::String("Off") : juce::String(value, 0) + " Hz";
-        };
+    // The parameter owns both text directions, including the filter bypass sentinel.
     knob.slider.updateText();
     addAndMakeVisible(knob.slider); addAndMakeVisible(knob.label);
 }
@@ -404,7 +395,7 @@ void ReverseLabAudioProcessorEditor::timerCallback()
     rightSize.setAlpha(linked ? 0.42f : 1.0f);
     rightFreeTime.setAlpha(linked ? 0.42f : 1.0f);
     rightSizeLabel.setAlpha(linked ? 0.56f : 1.0f);
-    rightSizeLabel.setText(linked ? "RIGHT SIZE · LINKED" : "RIGHT SIZE", juce::dontSendNotification);
+    rightSizeLabel.setText(linked ? "RIGHT SIZE - LINKED" : "RIGHT SIZE", juce::dontSendNotification);
     const auto samples = pluginProcessor.getCurrentLatencySamples();
     const auto ms = samples * 1000.0 / juce::jmax(1.0, pluginProcessor.getSampleRate());
     latencyLabel.setText("LATENCY  " + juce::String(samples) + " smp  /  " + juce::String(ms, 1) + " ms",

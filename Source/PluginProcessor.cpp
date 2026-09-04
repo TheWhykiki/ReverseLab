@@ -42,6 +42,7 @@ void ReverseLabAudioProcessor::prepareToPlay(double sampleRate, int)
     filterState = {};
     wasPlaying = false;
     previousBlockPosition.reset();
+    previousBlockSamples = 0;
     appliedSeed = 0;
     retriggerCountdown = -1;
     lastRetriggerParameter = false;
@@ -118,6 +119,7 @@ void ReverseLabAudioProcessor::releaseResources()
     wetTaps = {};
     wasPlaying = false;
     previousBlockPosition.reset();
+    previousBlockSamples = 0;
     for (auto& channel : scope)
         for (auto& value : channel)
             value.store(0.0f, std::memory_order_relaxed);
@@ -154,16 +156,30 @@ double ReverseLabAudioProcessor::getTailLengthSeconds() const
         static_cast<int>(parameters.getRawParameterValue(rl::params::rightSize)->load()),
         parameters.getRawParameterValue(rl::params::rightFreeMs)->load(), publishedBpm.load(),
         publishedBeatsPerBar.load(), sync);
-    const auto segmentSeconds = static_cast<double>(juce::jmax(left, right))
-                                / juce::jmax(1.0, currentSampleRate);
+    // Include an old, still-active segment while a length/latency change is in flight.
+    const auto segmentSamples = juce::jmax(juce::jmax(left, right),
+        juce::jmax(pendingLatency.load(), acknowledgedLatency.load()));
+    const auto rate = juce::jmax(1.0, currentSampleRate);
+    const auto segmentSeconds = static_cast<double>(segmentSamples) / rate;
     if (parameters.getRawParameterValue(rl::params::freeze)->load() > 0.5f)
         return 3600.0;
     const auto feedback = juce::jlimit(0.0, 0.95,
         static_cast<double>(parameters.getRawParameterValue(rl::params::feedback)->load()) * 0.01);
-    if (feedback <= 0.000001)
-        return segmentSeconds;
-    const auto repeatsToMinus60dB = std::ceil(std::log(0.001) / std::log(feedback));
-    return juce::jlimit(segmentSeconds, 3600.0, segmentSeconds * (1.0 + repeatsToMinus60dB));
+    const auto speed = juce::jlimit(0.25, 4.0,
+        static_cast<double>(parameters.getRawParameterValue(rl::params::speed)->load()));
+    // Half of the 0.01%-parameter step ignores normalised zero's float roundoff; it cannot
+    // produce even a one-sample offset anywhere in the supported 16-second history.
+    const auto shifted = std::abs(parameters.getRawParameterValue(rl::params::stereoOffset)->load()) >= 0.005f
+                         || parameters.getRawParameterValue(rl::params::random)->load() >= 0.005f;
+    const auto historySeconds = juce::jmax(segmentSeconds, static_cast<double>(maximumDelay + 8) / rate);
+    // During reverse playback reader and writer separate at (speed+1). Offset/random can wrap
+    // into any older ring frame; an exhausted reader can then hold that frame for a segment.
+    const auto readAge = shifted ? historySeconds + segmentSeconds
+        : juce::jmin((1.0 + speed) * segmentSeconds + 4.0 / rate, historySeconds + segmentSeconds);
+    // A millisecond per pass covers the feedback anti-alias pole; 100 ms covers parameter/filter
+    // settling. Extra wet alignment is outside the feedback loop, so add it only once.
+    const auto repeats = feedback <= 0.000001 ? 0.0 : std::ceil(std::log(0.0001) / std::log(feedback));
+    return (readAge + 0.001) * (1.0 + repeats) + segmentSeconds + 0.1;
 }
 
 void ReverseLabAudioProcessor::queueLatencyUpdate(int samples) noexcept
@@ -276,7 +292,7 @@ void ReverseLabAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, ju
     const auto transportDelta = playing && blockPosition && previousBlockPosition
         ? std::abs(static_cast<long double>(*blockPosition)
                    - static_cast<long double>(*previousBlockPosition)
-                   - static_cast<long double>(buffer.getNumSamples()))
+                   - static_cast<long double>(previousBlockSamples))
         : 0.0L;
     const auto transportJump = transportDelta
         > static_cast<long double>(juce::jmax<int64_t>(64, buffer.getNumSamples() * 2));
@@ -294,6 +310,7 @@ void ReverseLabAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, ju
     }
     wasPlaying = playing;
     previousBlockPosition = playing ? blockPosition : std::nullopt;
+    previousBlockSamples = buffer.getNumSamples();
 
     const auto sync = parameters.getRawParameterValue(rl::params::sync)->load() > 0.5f;
     const auto linked = parameters.getRawParameterValue(rl::params::link)->load() > 0.5f;

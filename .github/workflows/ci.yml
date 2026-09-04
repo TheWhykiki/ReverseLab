@@ -16,7 +16,7 @@ jobs:
       - name: Configure
         run: cmake -S . -B build -G Xcode -DCMAKE_BUILD_TYPE=Release
       - name: Build
-        run: cmake --build build --config Release --target ReverseLab_VST3 ReverseLabTests
+        run: cmake --build build --config Release
       - name: Test
         run: ctest --test-dir build -C Release --output-on-failure
       - name: Verify universal slices and deployment target
@@ -25,7 +25,9 @@ jobs:
           bin="$bundle/Contents/MacOS/ReverseLab"
           lipo -archs "$bin" | tee /dev/stderr | grep -q "arm64"
           lipo -archs "$bin" | grep -q "x86_64"
-          vtool -show-build "$bin" | grep -E "minos +11\.0"
+          for arch in arm64 x86_64; do
+            vtool -arch "$arch" -show-build "$bin" | grep -E 'minos +11\.0$'
+          done
           codesign --verify --deep --strict "$bundle"
       - name: Package and validate downloadable bundle
         run: |
@@ -36,6 +38,7 @@ jobs:
           restored="build/artifact-roundtrip/ReverseLab.vst3"
           test -x "$restored/Contents/MacOS/ReverseLab"
           codesign --verify --deep --strict "$restored"
+          build/ReverseLabHostTests_artefacts/Release/ReverseLabHostTests "$restored"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ReverseLab-VST3-${{ github.sha }}
@@ -56,7 +59,7 @@ jobs:
       - name: Configure
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
       - name: Build tests
-        run: cmake --build build --target ReverseLabTests -j"$(nproc)"
+        run: cmake --build build -j"$(nproc)"
       - name: Test
         run: ctest --test-dir build --output-on-failure
 
@@ -76,13 +79,16 @@ jobs:
           -DCMAKE_SHARED_LINKER_FLAGS="-fsanitize=address,undefined"
           -DCMAKE_MODULE_LINKER_FLAGS="-fsanitize=address,undefined"
       - name: Build tests
-        run: cmake --build build-asan --target ReverseLabTests ReverseLab_VST3 -j "$(sysctl -n hw.ncpu)"
+        run: cmake --build build-asan -j "$(sysctl -n hw.ncpu)"
       - name: Test
         env:
           ASAN_OPTIONS: detect_leaks=0
           UBSAN_OPTIONS: print_stacktrace=1
         run: ctest --test-dir build-asan --output-on-failure
       - name: Verify Makefiles bundle and ZIP roundtrip
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+          UBSAN_OPTIONS: print_stacktrace=1
         run: |
           bundle="build-asan/ReverseLab_artefacts/RelWithDebInfo/VST3/ReverseLab.vst3"
           codesign --verify --deep --strict "$bundle"
@@ -90,3 +96,4 @@ jobs:
           mkdir -p build-asan/artifact-roundtrip
           ditto -x -k build-asan/ReverseLab-VST3.zip build-asan/artifact-roundtrip
           codesign --verify --deep --strict build-asan/artifact-roundtrip/ReverseLab.vst3
+          build-asan/ReverseLabHostTests_artefacts/RelWithDebInfo/ReverseLabHostTests build-asan/artifact-roundtrip/ReverseLab.vst3

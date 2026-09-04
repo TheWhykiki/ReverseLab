@@ -1,0 +1,231 @@
+"""Pipeline contracts with fake macOS tools; no credentials or DAW required."""
+import importlib.util
+import json
+from pathlib import Path
+import plistlib
+import shutil
+import subprocess
+import tempfile
+import unittest
+from unittest.mock import patch
+
+SPEC = importlib.util.spec_from_file_location("release_pipeline", Path(__file__).resolve().parents[1] / "release_pipeline.py")
+pipeline = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(pipeline)
+
+
+class FakeTools:
+    def __init__(self, fail=None, version="1.0.4", arches="arm64 x86_64", notary_status="Accepted",
+                 corrupt=None, fail_host_at=None):
+        self.commands = []
+        self.fail, self.version, self.arches = fail, version, arches
+        self.notary_status = notary_status
+        self.corrupt, self.fail_host_at, self.host_calls = corrupt, fail_host_at, 0
+        self.source = self.payload = self.archived = None
+
+    def __call__(self, command, *, cwd=None, capture=False):
+        parts = [str(value) for value in command]
+        self.commands.append(parts)
+        tool = Path(parts[0]).name
+        if tool == "ReverseLabHostTests":
+            self.host_calls += 1
+            if self.host_calls == self.fail_host_at:
+                raise subprocess.CalledProcessError(1, parts)
+        if self.fail == tool:
+            raise subprocess.CalledProcessError(1, parts)
+        output = ""
+        if tool == "cmake" and "-S" in parts:
+            self.source = Path(parts[parts.index("-S") + 1])
+        elif tool == "cmake" and "--build" in parts:
+            build = Path(parts[2])
+            bundle = build / "ReverseLab_artefacts/Release/VST3/ReverseLab.vst3"
+            binary = bundle / "Contents/MacOS/ReverseLab"
+            binary.parent.mkdir(parents=True)
+            binary.write_bytes((self.source / "Source/processor.cpp").read_bytes())
+            binary.chmod(0o755)
+            (bundle / "Contents/Info.plist").write_bytes(plistlib.dumps({"CFBundleShortVersionString": self.version}))
+        elif tool == "ctest":
+            Path(parts[parts.index("--output-junit") + 1]).write_text('<testsuite tests="1" failures="0"/>\n')
+            test_log = Path(parts[parts.index("--test-dir") + 1]) / "Testing/Temporary/LastTest.log"
+            test_log.parent.mkdir(parents=True)
+            test_log.write_text("Fake test log for pipeline unit tests\n")
+        elif tool == "lipo":
+            output = self.arches
+        elif tool == "xcrun" and parts[1] == "vtool":
+            output = "minos 11.0\n"
+        elif tool == "xcrun" and parts[1] == "notarytool":
+            output = json.dumps({"status": self.notary_status})
+        elif tool == "ditto":
+            if "-c" in parts:
+                self.archived = Path(parts[-2])
+                Path(parts[-1]).write_bytes(b"fake ZIP")
+            elif "-x" in parts:
+                shutil.copytree(self.archived, Path(parts[-1]) / "ReverseLab.vst3")
+                if self.corrupt == "zip":
+                    (Path(parts[-1]) / "ReverseLab.vst3/Contents/MacOS/ReverseLab").write_bytes(b"corrupt")
+            else:
+                shutil.copytree(parts[1], parts[2])
+        elif tool == "pkgbuild":
+            self.payload = Path(parts[parts.index("--root") + 1])
+            Path(parts[-1]).write_bytes(b"fake PKG")
+        elif tool == "pkgutil":
+            shutil.copytree(self.payload, Path(parts[-1]) / "Payload")
+            if self.corrupt == "payload":
+                (Path(parts[-1]) / "Payload/Library/Audio/Plug-Ins/VST3/ReverseLab.vst3/Contents/MacOS/ReverseLab").write_bytes(b"corrupt")
+        return subprocess.CompletedProcess(parts, 0, stdout=output)
+
+
+class ReleasePipelineTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        (self.root / "Source").mkdir()
+        (self.root / "CMakeLists.txt").write_text("project(ReverseLab VERSION 1.0.4 LANGUAGES C CXX)\n")
+        (self.root / "Source/processor.cpp").write_text("current source\n")
+        (self.root / ".gitignore").write_text("/dist/\n/.release-candidate-*/\n")
+        for command in (["git", "init", "-q"], ["git", "add", "."],
+                        ["git", "-c", "user.name=Pipeline Test", "-c", "user.email=pipeline@example.invalid",
+                         "commit", "-qm", "fixture"]):
+            subprocess.run(command, cwd=self.root, check=True, capture_output=True)
+        (self.root / "dist").mkdir()
+        self.previous = self.root / "dist/previous.pkg"
+        self.previous.write_bytes(b"keep previous release")
+        self.addCleanup(patch.stopall)
+        patch.object(pipeline.platform, "system", return_value="Darwin").start()
+        patch.object(pipeline.shutil, "which", return_value="/fake/tool").start()
+
+    def package(self, tools=None, environment=None, **options):
+        return pipeline.package_release(self.root, runner=tools or FakeTools(),
+                                        environment=environment or {}, **options)
+
+    def assertPreviousPreserved(self):
+        self.assertEqual(self.previous.read_bytes(), b"keep previous release")
+        self.assertEqual(list((self.root / "dist").iterdir()), [self.previous])
+        self.assertEqual(list(self.root.glob(".release-candidate-*")), [])
+
+    def test_invalid_configuration_fails_before_tools_or_dist_changes(self):
+        for options, environment in [({"configuration": "Debug"}, {}),
+                                     ({"version_override": "2.0.0"}, {}),
+                                     ({}, {"REVERSELAB_NOTARY_PROFILE": "profile"}),
+                                     ({}, {"REVERSELAB_APPLICATION_IDENTITY": "app"}),
+                                     ({}, {"REVERSELAB_APPLICATION_IDENTITY": "-", "REVERSELAB_INSTALLER_IDENTITY": "-"}),
+                                     ({}, {"REVERSELAB_BUILD_JOBS": "0"})]:
+            with self.subTest(options=options, environment=environment):
+                tools = FakeTools()
+                with self.assertRaises(pipeline.ReleaseError):
+                    self.package(tools, environment, **options)
+                self.assertEqual(tools.commands, [])
+                self.assertPreviousPreserved()
+
+    def test_build_test_sign_package_and_host_failures_preserve_previous_artifacts(self):
+        for tool in ("cmake", "ctest", "codesign", "pkgbuild", "pkgutil", "ReverseLabHostTests"):
+            with self.subTest(tool=tool):
+                with self.assertRaises(subprocess.CalledProcessError):
+                    self.package(FakeTools(fail=tool))
+                self.assertPreviousPreserved()
+
+    def test_wrong_bundle_version_or_architecture_never_publishes(self):
+        for tools in (FakeTools(version="1.0.3"), FakeTools(arches="arm64")):
+            with self.assertRaises(pipeline.ReleaseError):
+                self.package(tools)
+            self.assertPreviousPreserved()
+
+    def test_notary_invalid_status_never_publishes_even_if_command_exits_zero(self):
+        with self.assertRaisesRegex(pipeline.ReleaseError, "not accepted"):
+            self.package(FakeTools(notary_status="Invalid"),
+                         {"REVERSELAB_APPLICATION_IDENTITY": "app", "REVERSELAB_INSTALLER_IDENTITY": "installer",
+                          "REVERSELAB_NOTARY_PROFILE": "profile"})
+        self.assertPreviousPreserved()
+
+    def test_corrupted_zip_or_installer_payload_is_not_published(self):
+        for location in ("zip", "payload"):
+            with self.subTest(location=location):
+                with self.assertRaisesRegex(pipeline.ReleaseError, "differs"):
+                    self.package(FakeTools(corrupt=location))
+                self.assertPreviousPreserved()
+
+    def test_zip_and_installer_payload_host_failures_preserve_old_release(self):
+        for invocation in (1, 2):
+            with self.subTest(invocation=invocation):
+                tools = FakeTools(fail_host_at=invocation)
+                with self.assertRaises(subprocess.CalledProcessError):
+                    self.package(tools)
+                self.assertEqual(tools.host_calls, invocation)
+                self.assertPreviousPreserved()
+
+    def test_fresh_snapshot_ignores_stale_same_version_build_and_binds_dirty_source(self):
+        (self.root / "build").mkdir()
+        (self.root / "build/stale.vst3").write_bytes(b"old binary with same version")
+        (self.root / "Source/processor.cpp").write_text("uncommitted current source\n")
+        tools = FakeTools()
+        candidate = self.package(tools)
+        manifest = json.loads((candidate / "release-manifest.json").read_text())
+        self.assertTrue(manifest["dirty"])
+        self.assertEqual(manifest["built_binary_sha256"], pipeline.digest(b"uncommitted current source\n"))
+        self.assertEqual(self.previous.read_bytes(), b"keep previous release")
+        self.assertFalse((candidate / "build/stale.vst3").exists())
+        commands = [Path(command[0]).name for command in tools.commands]
+        self.assertLess(commands.index("ctest"), commands.index("pkgbuild"))
+        self.assertEqual(commands.count("ReverseLabHostTests"), 2)
+        self.assertTrue((candidate / "ctest-results.xml").is_file())
+        self.assertTrue((candidate / "CTest-LastTest.log").is_file())
+        for name, expected in manifest["artifacts"].items():
+            self.assertEqual(pipeline.file_hash(candidate / name), expected)
+
+    def test_source_hash_changes_for_uncommitted_edit_and_new_source_file(self):
+        _, first = pipeline.source_inputs(self.root)
+        (self.root / "Source/processor.cpp").write_text("changed\n")
+        _, second = pipeline.source_inputs(self.root)
+        (self.root / "Tests").mkdir()
+        (self.root / "Tests/new_test.cpp").write_text("new test\n")
+        _, third = pipeline.source_inputs(self.root)
+        self.assertEqual(first["repositories"][0]["commit"], third["repositories"][0]["commit"])
+        self.assertNotEqual(first["source_sha256"], second["source_sha256"])
+        self.assertNotEqual(second["source_sha256"], third["source_sha256"])
+        self.assertIn("Tests/new_test.cpp", [record["path"] for record in third["files"]])
+        (self.root / "Presets").mkdir()
+        (self.root / "Presets/new-preset.json").write_text('{"name":"new"}\n')
+        _, fourth = pipeline.source_inputs(self.root)
+        self.assertNotEqual(third["source_sha256"], fourth["source_sha256"])
+        self.assertIn("Presets/new-preset.json", [record["path"] for record in fourth["files"]])
+
+    def test_existing_candidate_is_not_replaced(self):
+        candidate = self.package()
+        before = (candidate / "release-manifest.json").read_bytes()
+        with self.assertRaisesRegex(pipeline.ReleaseError, "already exists"):
+            self.package()
+        self.assertEqual((candidate / "release-manifest.json").read_bytes(), before)
+        self.assertEqual(self.previous.read_bytes(), b"keep previous release")
+
+    def test_submodule_checked_out_bytes_are_part_of_source_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            module = Path(directory)
+            (module / "module.cpp").write_text("original module\n")
+            for command in (["git", "init", "-q"], ["git", "add", "."],
+                            ["git", "-c", "user.name=Pipeline Test", "-c", "user.email=pipeline@example.invalid",
+                             "commit", "-qm", "module fixture"]):
+                subprocess.run(command, cwd=module, check=True, capture_output=True)
+            subprocess.run(["git", "-c", "protocol.file.allow=always", "submodule", "add", "-q",
+                            str(module), "external/JUCE"], cwd=self.root, check=True, capture_output=True)
+        _, before = pipeline.source_inputs(self.root)
+        (self.root / "external/JUCE/module.cpp").write_text("dirty dependency\n")
+        _, after = pipeline.source_inputs(self.root)
+        self.assertNotEqual(before["source_sha256"], after["source_sha256"])
+        self.assertEqual(after["repositories"][1]["path"], "external/JUCE")
+        self.assertTrue(after["repositories"][1]["dirty"])
+        self.assertIn("external/JUCE/module.cpp", [record["path"] for record in after["files"]])
+
+    def test_atomic_publication_failure_keeps_existing_releases(self):
+        artifacts = self.root / "completed-artifacts"
+        artifacts.mkdir()
+        (artifacts / "new.pkg").write_bytes(b"new release")
+        with patch.object(Path, "rename", side_effect=OSError("simulated rename failure")):
+            with self.assertRaises(OSError):
+                pipeline.publish_candidate(artifacts, self.root / "dist", "new-candidate")
+        self.assertPreviousPreserved()
+        self.assertEqual((artifacts / "new.pkg").read_bytes(), b"new release")
+
+
+if __name__ == "__main__":
+    unittest.main()

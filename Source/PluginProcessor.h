@@ -138,6 +138,7 @@ private:
     double smoothedBpm = 120.0;
     bool wasPlaying = false;
     std::optional<int64_t> previousBlockPosition;
+    int previousBlockSamples = 0;
     bool lastRetriggerParameter = false;
     bool applyingProgramChange = false;
     uint32_t appliedSeed = 0;

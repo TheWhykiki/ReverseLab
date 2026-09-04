@@ -68,7 +68,7 @@ int ReverseEngine::wrap(int position) const noexcept
     return position < 0 ? position + capacity : position;
 }
 
-float ReverseEngine::readInterpolated(int channel, double position) const noexcept
+ReverseEngine::ReadSample ReverseEngine::readInterpolated(int channel, double position) const noexcept
 {
     while (position < 0.0) position += static_cast<double>(capacity);
     while (position >= static_cast<double>(capacity)) position -= static_cast<double>(capacity);
@@ -89,7 +89,8 @@ float ReverseEngine::readInterpolated(int channel, double position) const noexce
     const auto c1 = 0.5f * (y2 - y0);
     const auto c2 = y0 - 2.5f * y1 + 2.0f * y2 - 0.5f * y3;
     const auto c3 = 0.5f * (y3 - y0) + 1.5f * (y1 - y2);
-    return static_cast<float>(((c3 * frac + c2) * frac + c1) * frac + c0);
+    return { static_cast<float>(((c3 * frac + c2) * frac + c1) * frac + c0),
+             static_cast<float>((1.0 - frac) * y1 + frac * y2) };
 }
 
 double ReverseEngine::distanceFromWriter(double readPosition) const noexcept
@@ -113,7 +114,7 @@ void ReverseEngine::beginSegment(int channel, int requestedLength, const EngineS
     head.phase = 0.0f;
     head.readOffset = 0.0;
     head.transitionPhase = 0.0f;
-    head.lastRead = 0.0f;
+    head.lastRead = {};
     head.historyRemaining = distanceFromWriter(static_cast<double>(head.segmentEnd));
     head.readExhausted = false;
     head.nextPrepared = false;
@@ -129,14 +130,15 @@ void ReverseEngine::prepareNextSegment(int channel, int requestedLength, const E
                                                 * settings.randomAmount * 0.5f * static_cast<float>(head.nextLength));
     const auto channelOffset = static_cast<int>(stereo * 0.5f * static_cast<float>(head.nextLength));
     head.nextEnd = wrap(writePosition - 1 - randomOffset - channelOffset);
-    head.nextLastRead = 0.0f;
+    head.nextLastRead = {};
     head.nextHistoryRemaining = distanceFromWriter(static_cast<double>(head.nextEnd));
     head.nextReadExhausted = false;
     head.nextPrepared = true;
 }
 
-float ReverseEngine::readCaptured(int channel, int end, double offset, float speed, bool mayOverwrite,
-                                  double& remaining, float& lastRead, bool& exhausted) const noexcept
+ReverseEngine::ReadSample ReverseEngine::readCaptured(int channel, int end, double offset, float speed,
+                                                      bool mayOverwrite, double& remaining,
+                                                      ReadSample& lastRead, bool& exhausted) const noexcept
 {
     if (mayOverwrite)
     {
@@ -161,7 +163,9 @@ float ReverseEngine::processSample(int channel, float input, const EngineSetting
     // 100%-wet instance would remain silent forever because Freeze also prevents all writes.
     const auto requiredCapture = juce::jlimit(16, capacity - 8,
                                               juce::jmax(settings.leftLength, settings.rightLength));
-    const bool freezeActive = settings.freeze && capturedFrames >= requiredCapture;
+    // Pre-roll is required only before the latch first engages. Longer requested windows (also
+    // produced by slower tempo) must not silently resume writing into an already held capture.
+    const bool freezeActive = settings.freeze && (frozenHold || capturedFrames >= requiredCapture);
     frozenHold = freezeActive;
     const bool triggerEdge = settings.retrigger && !head.lastRetrigger;
     head.lastRetrigger = settings.retrigger;
@@ -222,8 +226,11 @@ float ReverseEngine::processSample(int channel, float input, const EngineSetting
         const auto nextWet = readCaptured(channel, head.nextEnd, head.nextOffset, settings.speed,
                                           !freezeActive, head.nextHistoryRemaining,
                                           head.nextLastRead, head.nextReadExhausted);
-        wet = wet * std::cos(transition * juce::MathConstants<float>::halfPi)
-              + nextWet * std::sin(transition * juce::MathConstants<float>::halfPi);
+        wet.output = wet.output * std::cos(transition * juce::MathConstants<float>::halfPi)
+                     + nextWet.output * std::sin(transition * juce::MathConstants<float>::halfPi);
+        // Equal-power crossfades can add up to sqrt(2) for correlated material. Keep that
+        // audible shape, but never feed its gain boost back into the ring on every repeat.
+        wet.feedback = (1.0f - transition) * wet.feedback + transition * nextWet.feedback;
         head.nextOffset += static_cast<double>(settings.speed);
         head.transitionPhase += 1.0f;
     }
@@ -233,15 +240,20 @@ float ReverseEngine::processSample(int channel, float input, const EngineSetting
         const auto cutoff = static_cast<float>(sampleRate) * 0.45f / settings.speed;
         const auto coefficient = 1.0f - std::exp(-juce::MathConstants<float>::twoPi * cutoff
                                                   / static_cast<float>(sampleRate));
-        head.antiAliasState += coefficient * (wet - head.antiAliasState);
-        wet = head.antiAliasState;
+        head.antiAliasState += coefficient * (wet.output - head.antiAliasState);
+        head.feedbackAntiAliasState += coefficient * (wet.feedback - head.feedbackAntiAliasState);
+        wet.output = head.antiAliasState;
+        wet.feedback = head.feedbackAntiAliasState;
     }
     else
-        head.antiAliasState = wet;
+    {
+        head.antiAliasState = wet.output;
+        head.feedbackAntiAliasState = wet.feedback;
+    }
 
     if (!freezeActive)
     {
-        const auto write = juce::jlimit(-4.0f, 4.0f, input + wet * settings.feedback);
+        const auto write = juce::jlimit(-4.0f, 4.0f, input + wet.feedback * settings.feedback);
         ring.setSample(channel, writePosition, std::isfinite(write) ? write : 0.0f);
         wroteCurrentPosition = true;
     }
@@ -251,7 +263,7 @@ float ReverseEngine::processSample(int channel, float input, const EngineSetting
     publishedPhase[(size_t) channel].store(
         juce::jlimit(0.0f, 1.0f, head.phase / static_cast<float>(juce::jmax(1, head.activeLength))),
         std::memory_order_relaxed);
-    return std::isfinite(wet) ? wet : 0.0f;
+    return std::isfinite(wet.output) ? wet.output : 0.0f;
 }
 
 void ReverseEngine::advance() noexcept

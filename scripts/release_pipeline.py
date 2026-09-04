@@ -6,6 +6,7 @@ uses a source snapshot including initialized submodules and dirty source files.
 Developer-ID signing and notarization require real caller-provided identities.
 """
 import argparse
+from contextlib import contextmanager
 import hashlib
 import json
 import os
@@ -163,6 +164,64 @@ def publish_candidate(artifacts, dist, name):
         lock.unlink()
 
 
+def save_failure_evidence(stage, context, error):
+    """Keep diagnostics, never a failed package, after temporary build cleanup."""
+    if stage.parent.is_symlink():
+        raise ReleaseError("Refusing a symlinked diagnostics destination")
+    destination = Path(tempfile.mkdtemp(prefix="failed-run-", dir=stage.parent))
+    provenance = context.get("provenance")
+    external = isinstance(error, subprocess.CalledProcessError)
+    command = error.cmd if external else None
+    tool = Path(str(command[0])).name if isinstance(command, (list, tuple)) and command else None
+    details = {"schema": 1, "status": "failed", "step": context["step"],
+               "error_type": type(error).__name__, "tool": tool,
+               "exit_code": error.returncode if external else None,
+               "commit": provenance["repositories"][0]["commit"] if provenance else None,
+               "source_sha256": provenance["source_sha256"] if provenance else None,
+               "artifacts": {}, "unavailable_reports": []}
+    # Mark the folder failed immediately, even if a later diagnostic copy fails.
+    # Do not persist environment variables, signing arguments, or notary credentials.
+    write_json(destination / "failure.json", details)
+    if provenance:
+        write_json(destination / "source-manifest.json", provenance)
+    reports = {"ctest-results.xml": stage / "ctest-results.xml",
+               "CTest-LastTest.log": stage / "build/Testing/Temporary/LastTest.log",
+               "CTest-LastTestsFailed.log": stage / "build/Testing/Temporary/LastTestsFailed.log",
+               "CMakeConfigureLog.yaml": stage / "build/CMakeFiles/CMakeConfigureLog.yaml",
+               "CMakeError.log": stage / "build/CMakeFiles/CMakeError.log"}
+    for name, source in reports.items():
+        if not source.is_file():
+            continue  # An earlier failure may never have reached CMake/CTest.
+        try:
+            shutil.copy2(source, destination / name)
+        except OSError:
+            details["unavailable_reports"].append(name)
+    # Captured errors (e.g. the isolated recipe checker) have no CTest log yet.
+    if external:
+        for name, content in (("command-stdout.log", error.stdout), ("command-stderr.log", error.stderr)):
+            if content:
+                (destination / name).write_bytes(content.encode() if isinstance(content, str) else content)
+    details["artifacts"] = {path.name: file_hash(path) for path in sorted(destination.iterdir())
+                            if path.is_file() and path.name != "failure.json"}
+    write_json(destination / "failure.json", details)
+    print(f"Failed-run diagnostics (not a release): {destination}", file=sys.stderr)
+    return destination
+
+
+@contextmanager
+def retain_failure_evidence(stage):
+    context = {"step": "source_snapshot"}
+    try:
+        yield context
+    except (Exception, KeyboardInterrupt) as error:
+        try:
+            save_failure_evidence(stage, context, error)
+        except Exception as diagnostic_error:
+            # A full disk or unreadable diagnostic must not hide the original failure.
+            print(f"Could not retain failed-run diagnostics: {type(diagnostic_error).__name__}", file=sys.stderr)
+        raise
+
+
 def package_release(root, configuration="Release", version_override=None, environment=None, runner=run):
     root = Path(root).resolve()
     environment = os.environ if environment is None else environment
@@ -176,30 +235,39 @@ def package_release(root, configuration="Release", version_override=None, enviro
     dist.mkdir(exist_ok=True)
     # dist is git-ignored, so a concurrent status/add cannot accidentally pick up
     # the multi-gigabyte temporary source/build tree. Publication stays same-volume.
-    with tempfile.TemporaryDirectory(prefix=".release-candidate-", dir=dist) as temporary:
+    with tempfile.TemporaryDirectory(prefix=".release-candidate-", dir=dist) as temporary, \
+            retain_failure_evidence(Path(temporary)) as diagnostics:
         stage = Path(temporary)
         source = stage / "source"
         provenance = snapshot_source(root, source)
+        diagnostics["provenance"] = provenance
         if validate_options(source, configuration, version_override, environment)[0] != version:
             raise ReleaseError("Project version changed while taking the source snapshot")
         # Compiled preset tests cannot detect JSON edits absent from FactoryBank.h.
         # Check the immutable snapshot, not the live checkout, before any build.
         # Ignore PYTHONOPTIMIZE so the generator's assertions cannot be disabled.
+        diagnostics["step"] = "verify_factory_bank"
         runner([sys.executable, "-I", source / "scripts/generate-presets.py", "--check"])
         build = stage / "build"
+        diagnostics["step"] = "configure"
         runner(["cmake", "-S", source, "-B", build, "-G", "Unix Makefiles", "-DCMAKE_BUILD_TYPE=Release"])
         # Build the default target so every registered CTest executable is built,
         # including future preset/parameter tests added without editing this script.
+        diagnostics["step"] = "build"
         runner(["cmake", "--build", build, "-j", jobs])
         test_report = stage / "ctest-results.xml"
+        diagnostics["step"] = "ctest"
         runner(["ctest", "--test-dir", build, "--output-on-failure", "--no-tests=error",
                 "--output-junit", test_report])
         bundle = build / "ReverseLab_artefacts/Release/VST3/ReverseLab.vst3"
+        diagnostics["step"] = "validate_bundle"
         built_hash = validate_bundle(bundle, version, runner)
         payload = stage / "payload"
         staged_bundle = payload / "Library/Audio/Plug-Ins/VST3/ReverseLab.vst3"
         staged_bundle.parent.mkdir(parents=True)
+        diagnostics["step"] = "stage_bundle"
         runner(["ditto", bundle, staged_bundle])
+        diagnostics["step"] = "sign_bundle"
         if app:
             runner(["codesign", "--force", "--deep", "--options", "runtime", "--timestamp", "--sign", app, staged_bundle])
         else:
@@ -217,8 +285,10 @@ def package_release(root, configuration="Release", version_override=None, enviro
                    "--version", version, "--install-location", "/"]
         if installer:
             command += ["--sign", installer]
+        diagnostics["step"] = "pkgbuild"
         runner(command + [package])
         if notary:
+            diagnostics["step"] = "notarize"
             response = runner(["xcrun", "notarytool", "submit", package, "--keychain-profile", notary,
                                "--wait", "--output-format", "json"], capture=True)
             if json.loads(response.stdout).get("status") != "Accepted":
@@ -227,6 +297,7 @@ def package_release(root, configuration="Release", version_override=None, enviro
                 runner(["xcrun", "stapler", "staple", target])
                 runner(["xcrun", "stapler", "validate", target])
         archive = artifacts / f"ReverseLab-{version}-macOS-universal-VST3.zip"
+        diagnostics["step"] = "zip_roundtrip"
         runner(["ditto", "-c", "-k", "--sequesterRsrc", "--keepParent", staged_bundle, archive])
         roundtrip = stage / "zip-roundtrip"
         runner(["ditto", "-x", "-k", archive, roundtrip])
@@ -234,13 +305,17 @@ def package_release(root, configuration="Release", version_override=None, enviro
         if validate_bundle(restored, version, runner) != packaged_hash:
             raise ReleaseError("ZIP-restored binary differs from the signed candidate")
         host = build / "ReverseLabHostTests_artefacts/Release/ReverseLabHostTests"
+        diagnostics["step"] = "zip_host"
         runner([host, restored])
         expanded = stage / "package-roundtrip"
+        diagnostics["step"] = "installer_roundtrip"
         runner(["pkgutil", "--expand-full", package, expanded])
         installed = expanded / "Payload/Library/Audio/Plug-Ins/VST3/ReverseLab.vst3"
         if validate_bundle(installed, version, runner) != packaged_hash:
             raise ReleaseError("Installer payload differs from the signed candidate")
+        diagnostics["step"] = "installer_host"
         runner([host, installed])
+        diagnostics["step"] = "write_manifests"
         write_json(artifacts / "source-manifest.json", provenance)
         manifest = {"schema": 1, "version": version, "configuration": configuration,
                     "commit": provenance["repositories"][0]["commit"],
@@ -256,6 +331,7 @@ def package_release(root, configuration="Release", version_override=None, enviro
         (artifacts / "SHA256SUMS.txt").write_text(checksums)
         name = (f"ReverseLab-{version}-{manifest['commit'][:12]}-"
                 f"{provenance['source_sha256'][:16]}-{packaged_hash[:12]}")
+        diagnostics["step"] = "publish"
         destination = publish_candidate(artifacts, dist, name)
     print(f"Validated release candidate: {destination}")
     return destination

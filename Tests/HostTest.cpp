@@ -40,6 +40,47 @@ bool finiteSamples(const juce::AudioBuffer<float>& audio)
     return true;
 }
 
+bool isNormalizedParameterValue(float value)
+{
+    return std::isfinite(value) && value >= 0.0f && value <= 1.0f;
+}
+
+bool parameterStateMatches(float expected, float actual)
+{
+    // Reject invalid operands before subtraction: abs(NaN) >= tolerance is false.
+    return isNormalizedParameterValue(expected) && isNormalizedParameterValue(actual)
+           && std::abs(actual - expected) < 1.0e-5f;
+}
+
+void calibrateParameterStateValidator()
+{
+    require(parameterStateMatches(0.0f, 0.0f) && parameterStateMatches(1.0f, 1.0f)
+            && parameterStateMatches(0.5f, 0.5f + 5.0e-6f),
+            "Parameter validator rejected a valid normalized control");
+    require(! parameterStateMatches(0.5f, 0.5f + 2.0e-5f),
+            "Parameter validator accepted a difference outside the existing tolerance");
+    for (const auto invalid : { std::numeric_limits<float>::quiet_NaN(),
+                                std::numeric_limits<float>::infinity(),
+                                -std::numeric_limits<float>::infinity() })
+    {
+        require(! parameterStateMatches(0.5f, invalid),
+                "Parameter validator accepted a nonfinite restored value");
+        require(! parameterStateMatches(invalid, 0.5f),
+                "Parameter validator accepted a nonfinite saved value");
+        require(! parameterStateMatches(invalid, invalid),
+                "Parameter validator accepted a nonfinite value pair");
+    }
+    for (const auto invalid : { -0.01f, 1.01f })
+    {
+        require(! parameterStateMatches(invalid, invalid),
+                "Parameter validator accepted matching values outside the normalized range");
+        require(! parameterStateMatches(0.5f, invalid)
+                && ! parameterStateMatches(invalid, 0.5f),
+                "Parameter validator accepted an operand outside the normalized range");
+    }
+    std::fprintf(stderr, "[host-test] parameter validator: normalized controls and NaN/+Inf/-Inf in both operands passed\n");
+}
+
 std::vector<float> render(juce::AudioPluginInstance& plugin)
 {
     constexpr int blockSize = 256, totalSamples = 96000;
@@ -87,6 +128,7 @@ int main(int argc, char** argv)
         invalid.clear();
         invalid.setSample(1, 5, std::numeric_limits<float>::quiet_NaN());
         require(! finiteSamples(invalid), "NaN validator failed calibration");
+        calibrateParameterStateValidator();
         std::fprintf(stderr, "[host-test] scanning %s\n", argv[1]);
         juce::VST3PluginFormat scanner;
         juce::OwnedArray<juce::PluginDescription> descriptions;
@@ -109,14 +151,16 @@ int main(int argc, char** argv)
             // for a canonical request instead of treating that difference as loss.
             const auto text = value.getText(setting.second, 128);
             const auto canonical = value.getValueForText(text);
-            require(std::isfinite(canonical) && canonical >= 0.0f && canonical <= 1.0f,
+            require(isNormalizedParameterValue(canonical),
                     "VST3 parameter returned an invalid canonical value");
             if (std::abs(canonical - setting.second) > 1.0e-7f)
                 std::fprintf(stderr, "[host-test] canonical %s: request=%g text='%s' value=%g\n",
                              setting.first, static_cast<double>(setting.second), text.toRawUTF8(),
                              static_cast<double>(canonical));
             value.setValueNotifyingHost(canonical);
-            expectedParameters.push_back(value.getValue());
+            const auto saved = value.getValue();
+            require(isNormalizedParameterValue(saved), "VST3 parameter returned an invalid saved value");
+            expectedParameters.push_back(saved);
         }
         juce::MemoryBlock state;
         instance->getStateInformation(state);
@@ -131,7 +175,7 @@ int main(int argc, char** argv)
         {
             const auto expected = expectedParameters[index++];
             const auto actual = parameter(*restored, setting.first).getValue();
-            if (std::abs(actual - expected) >= 1.0e-5f)
+            if (! parameterStateMatches(expected, actual))
             {
                 std::fprintf(stderr, "[host-test] %s: expected=%g restored=%g\n", setting.first,
                              static_cast<double>(expected), static_cast<double>(actual));

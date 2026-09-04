@@ -57,7 +57,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libasound2-dev libfreetype-dev libfontconfig1-dev \
-            libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxext-dev libgl1-mesa-dev xvfb xauth
+            libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxext-dev libgl1-mesa-dev \
+            xvfb xauth openbox x11-utils
       - name: Verify factory bank
         run: python3 scripts/generate-presets.py --check
       - name: Configure
@@ -65,7 +66,44 @@ jobs:
       - name: Build tests
         run: cmake --build build -j"$(nproc)"
       - name: Test
-        run: xvfb-run -a ctest --test-dir build --output-on-failure
+        run: |
+          xvfb-run -a bash -eu -o pipefail <<'BASH'
+          # JUCE caches WM_PROTOCOLS at startup, so the window manager must be ready
+          # on this same display before any CTest executable creates its desktop.
+          openbox --sm-disable >build/openbox.log 2>&1 &
+          wm_pid=$!
+          cleanup() {
+            kill "$wm_pid" 2>/dev/null || true
+            wait "$wm_pid" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
+          wm_ready=false
+          wm_ready_deadline=$((SECONDS + 10))
+          while (( SECONDS < wm_ready_deadline )); do
+            if ! kill -0 "$wm_pid" 2>/dev/null; then
+              printf '%s\n' 'Openbox exited before the test desktop became ready.' >&2
+              sed -n '1,$p' build/openbox.log >&2
+              exit 1
+            fi
+            if timeout 1 xprop -root _NET_SUPPORTING_WM_CHECK 2>/dev/null \
+                 | grep -Eq 'window id # 0x[0-9a-fA-F]*[1-9a-fA-F][0-9a-fA-F]*$' \
+               && timeout 1 xlsatoms -name WM_PROTOCOLS 2>/dev/null \
+                 | grep -Eq '^[[:space:]]*[1-9][0-9]*[[:space:]]+WM_PROTOCOLS$'; then
+              wm_ready=true
+              break
+            fi
+            sleep 0.1
+          done
+          if ! "$wm_ready"; then
+            printf '%s\n' 'Timed out waiting for Openbox and WM_PROTOCOLS on the test display.' >&2
+            sed -n '1,$p' build/openbox.log >&2
+            exit 1
+          fi
+          printf '[test-desktop] Openbox and WM_PROTOCOLS ready on %s\n' "$DISPLAY"
+          ctest --test-dir build --output-on-failure
+          BASH
 
   sanitizers:
     name: ASan + UBSan

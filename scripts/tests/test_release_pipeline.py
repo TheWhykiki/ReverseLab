@@ -110,8 +110,91 @@ class ReleasePipelineTests(unittest.TestCase):
 
     def assertPreviousPreserved(self):
         self.assertEqual(self.previous.read_bytes(), b"keep previous release")
-        self.assertEqual(list((self.root / "dist").iterdir()), [self.previous])
+        for entry in (self.root / "dist").iterdir():
+            if entry == self.previous:
+                continue
+            self.assertTrue(entry.is_dir() and entry.name.startswith("failed-run-"), entry)
+            self.assertEqual(json.loads((entry / "failure.json").read_text())["status"], "failed")
+            self.assertFalse((entry / "release-manifest.json").exists())
         self.assertEqual(list(self.root.glob(".release-candidate-*")), [])
+        self.assertEqual(list((self.root / "dist").glob(".release-candidate-*")), [])
+
+    def test_failed_ctest_preserves_source_and_test_reports(self):
+        tools = FakeTools()
+
+        def fail_after_report(command, **options):
+            result = tools(command, **options)
+            parts = [str(value) for value in command]
+            if parts[0] == "ctest":
+                Path(parts[parts.index("--output-junit") + 1]).write_text('<testsuite tests="1" failures="1"/>\n')
+                raise subprocess.CalledProcessError(8, parts)
+            return result
+
+        with self.assertRaises(subprocess.CalledProcessError) as raised:
+            self.package(fail_after_report)
+        self.assertEqual(raised.exception.returncode, 8)
+        reports = list((self.root / "dist").glob("failed-run-*"))
+        self.assertEqual(len(reports), 1, "Failed-run evidence must survive temporary build cleanup")
+        report = reports[0]
+        details = json.loads((report / "failure.json").read_text())
+        source = json.loads((report / "source-manifest.json").read_text())
+        self.assertEqual((details["status"], details["step"], details["tool"], details["exit_code"]),
+                         ("failed", "ctest", "ctest", 8))
+        self.assertEqual(details["commit"], source["repositories"][0]["commit"])
+        self.assertEqual(details["source_sha256"], source["source_sha256"])
+        self.assertIn('failures="1"', (report / "ctest-results.xml").read_text())
+        self.assertIn("Fake test log", (report / "CTest-LastTest.log").read_text())
+        for name, expected in details["artifacts"].items():
+            self.assertEqual(pipeline.file_hash(report / name), expected)
+        self.assertFalse(any(Path(command[0]).name == "pkgbuild" for command in tools.commands))
+        self.assertPreviousPreserved()
+
+    def test_host_failures_keep_distinct_diagnostics_not_release_candidates(self):
+        for invocation, step in ((1, "zip_host"), (2, "installer_host")):
+            with self.assertRaises(subprocess.CalledProcessError):
+                self.package(FakeTools(fail_host_at=invocation))
+            reports = list((self.root / "dist").glob("failed-run-*"))
+            self.assertEqual(len(reports), invocation)
+            matching = [folder for folder in reports
+                        if json.loads((folder / "failure.json").read_text())["step"] == step]
+            self.assertEqual(len(matching), 1)
+            self.assertTrue((matching[0] / "ctest-results.xml").is_file())
+            self.assertTrue((matching[0] / "CTest-LastTest.log").is_file())
+            self.assertFalse(any(matching[0].glob("*.pkg")))
+            self.assertFalse(any(matching[0].glob("*.zip")))
+            self.assertPreviousPreserved()
+
+    def test_snapshot_failure_has_no_fabricated_source_identity(self):
+        with patch.object(pipeline, "snapshot_source", side_effect=pipeline.ReleaseError("changed source")):
+            with self.assertRaisesRegex(pipeline.ReleaseError, "changed source"):
+                self.package()
+        report, = (self.root / "dist").glob("failed-run-*")
+        details = json.loads((report / "failure.json").read_text())
+        self.assertEqual(details["step"], "source_snapshot")
+        self.assertIsNone(details["commit"])
+        self.assertIsNone(details["source_sha256"])
+        self.assertFalse((report / "source-manifest.json").exists())
+        self.assertPreviousPreserved()
+
+    def test_diagnostics_failure_never_masks_original_tool_failure(self):
+        with patch.object(pipeline, "save_failure_evidence", side_effect=OSError("disk full")):
+            with self.assertRaises(subprocess.CalledProcessError) as raised:
+                self.package(FakeTools(fail="ctest"))
+        self.assertEqual(Path(raised.exception.cmd[0]).name, "ctest")
+        self.assertEqual(raised.exception.returncode, 1)
+        self.assertPreviousPreserved()
+
+    def test_failure_report_does_not_record_signing_or_notary_arguments(self):
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.package(FakeTools(fail="pkgbuild"),
+                         {"REVERSELAB_APPLICATION_IDENTITY": "private-app-identity-marker",
+                          "REVERSELAB_INSTALLER_IDENTITY": "private-installer-identity-marker",
+                          "REVERSELAB_NOTARY_PROFILE": "private-notary-profile-marker"})
+        report, = (self.root / "dist").glob("failed-run-*")
+        text = (report / "failure.json").read_text()
+        for marker in ("private-app-identity-marker", "private-installer-identity-marker", "private-notary-profile-marker"):
+            self.assertNotIn(marker, text)
+        self.assertPreviousPreserved()
 
     def test_invalid_configuration_fails_before_tools_or_dist_changes(self):
         for options, environment in [({"configuration": "Debug"}, {}),

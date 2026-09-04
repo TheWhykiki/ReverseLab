@@ -3,7 +3,9 @@
 Dieses Protokoll beschreibt noch auszuführende Prüfungen im DAW-Plugin. Ein
 grüner Audio-Bericht bestätigt die ausgewerteten Exporte; die folgenden
 Bedien- und Hörprüfungen benötigen eigene Ergebnisse. Alle Prüffälle beginnen
-mit dem Status `nicht geprüft`.
+mit dem Status `nicht geprüft`. Die hier festgelegten Exportnamen gehören
+zum Cubase-Protokoll. Andere Hosts als eigene Fälle dokumentieren; ihre
+Exporte nicht allein für ein erkanntes Dateipaar als Cubase-Dateien ausgeben.
 
 ## Prüflauf vorbereiten
 
@@ -74,6 +76,12 @@ mit dem Status `nicht geprüft`.
    denselben frischen Ausgangszustand. Sie ergänzt die Prüfung der ersten
    18 Sekunden nach Reload.
 4. Die passende Recall-Anforderung ausführen. Beispiele vom Repository-Root:
+
+   Zuerst beide Exporte vollständig abschließen. Während der Analyse die
+   WAV-Dateien nicht neu exportieren oder verändern. Der Auswerter berechnet
+   alle Messungen aus den je Datei einmal eingelesenen Bytes; ihre SHA-256-Werte
+   stehen im Bericht. Das ersetzt keine gemeinsame atomare Aufnahme aller
+   Dateien und keinen Nachweis über die tatsächlichen DAW-Schritte.
 
    ```sh
    python3 -B scripts/acceptance/analyse_host_audio.py /path/to/sub-case \
@@ -146,7 +154,7 @@ Für **jedes Plugin separat** mit eindeutig benannten Test-Presets durchführen:
 
 | Fall | Ablauf und erwartetes Ergebnis |
 |---|---|
-| Save As | Factory-Preset ändern, unter neuem Testnamen speichern, Instanz neu öffnen; Klang und Metadaten stimmen |
+| Save As | Factory-Preset ändern, unter neuem Testnamen speichern; in einer neu erzeugten Instanz dieses User-Preset ausdrücklich auswählen; Klang und Metadaten stimmen |
 | Save | Eigenes Test-Preset ändern und speichern; erneutes Laden stellt die gespeicherte Änderung her |
 | Ungespeicherte Änderung | Eigenes Preset ändern, nur das DAW-Projekt speichern und neu öffnen; geänderter Klang und Dirty-Anzeige bleiben erhalten |
 | Fehlende Bibliotheksdatei | Nur die Datei des eigens angelegten Test-Presets gesichert auslagern; Projekt neu öffnen; der eingebettete DAW-Klang bleibt erhalten; Testdatei anschließend zurücklegen |
@@ -159,6 +167,12 @@ Für **jedes Plugin separat** mit eindeutig benannten Test-Presets durchführen:
 Die Fälle mit eigenem gespeicherten und ungespeicherten Klang bekommen jeweils
 eine eigene Audio-Recall-Prüfung. UI-Erfolg und Klang-Erfolg separat erfassen:
 Ein identisches WAV beweist beispielsweise keinen korrekt angezeigten Namen.
+Das ausdrückliche Laden in einer neuen Instanz prüft die Preset-Datei. Bei der
+DAW-Projektwiederherstellung dagegen kein Preset nachladen: Sonst könnte ein
+defekter oder fehlender Projektzustand unbemerkt durch Bibliothekswerte ersetzt
+werden. Eine neu erzeugte Instanz muss nicht automatisch das zuletzt gespeicherte
+User-Preset auswählen. Das erneute Öffnen nur des Editorfensters wiederum
+erzeugt keine neue Plugin-Instanz und prüft keine dauerhafte Speicherung.
 
 ## Ergebnisvorlage
 

@@ -1,5 +1,6 @@
 """Regression tests for evidence generation (no DAW or external packages required)."""
 import contextlib
+import hashlib
 import io
 import json
 from pathlib import Path
@@ -22,13 +23,14 @@ class AcceptanceEvidenceTests(unittest.TestCase):
         self.cubase.mkdir()
         self.tail_file = self.cubase / "04-SubLab808-Cubase-after-reload-tail20s.wav"
 
-    def write_float_wave(self, seconds=36, overrides=None, path=None, rate=100, channels=2):
+    def write_float_wave(self, seconds=36, overrides=None, path=None, rate=100, channels=2, bits=32):
         samples = [0.125 if frame < 20 else 0.0
                    for frame in range(round(seconds * rate)) for _ in range(channels)]
         for index, value in (overrides or {}).items():
             samples[index] = value
-        data = struct.pack("<" + "f" * len(samples), *samples)
-        fmt = struct.pack("<HHIIHH", 3, channels, rate, rate * channels * 4, channels * 4, 32)
+        width = bits // 8
+        data = struct.pack("<" + ("f" if bits == 32 else "d") * len(samples), *samples)
+        fmt = struct.pack("<HHIIHH", 3, channels, rate, rate * channels * width, channels * width, bits)
         body = b"WAVEfmt " + struct.pack("<I", len(fmt)) + fmt + b"data" + struct.pack("<I", len(data)) + data
         path = path or self.tail_file
         path.write_bytes(b"RIFF" + struct.pack("<I", len(body)) + body)
@@ -292,10 +294,10 @@ class AcceptanceEvidenceTests(unittest.TestCase):
             self.write_float_wave(seconds=1, path=self.cubase / name)
         original_analyse = report.analyse
 
-        def deny_reload(path):
+        def deny_reload(path, **kwargs):
             if path.name == report.REVERSE_RELOAD:
                 raise PermissionError("Access denied to reload export")
-            return original_analyse(path)
+            return original_analyse(path, **kwargs)
 
         with patch.object(report, "analyse", side_effect=deny_reload):
             result = self.run_report("--require-recall", "reverselab")
@@ -336,6 +338,92 @@ class AcceptanceEvidenceTests(unittest.TestCase):
         self.assertFalse(result["analysis_completed"])
         self.assertFalse(result["passed"])
         self.assertEqual(result["input_errors"][0]["stage"], "host_summary")
+
+    def test_replaced_reload_file_cannot_change_the_compared_evidence(self):
+        self.write_float_wave(seconds=1, path=self.cubase / report.REVERSE_BASE)
+        after = self.write_float_wave(seconds=1, overrides={10: -0.125},
+                                      path=self.cubase / report.REVERSE_RELOAD)
+        captured_hash = hashlib.sha256(after.read_bytes()).hexdigest()
+        original_analyse = report.analyse
+
+        def replace_reload_after_analysis(path, **kwargs):
+            result = original_analyse(path, **kwargs)
+            if path.name == report.REVERSE_RELOAD:
+                self.write_float_wave(seconds=1, path=path)
+            return result
+
+        with patch.object(report, "analyse", side_effect=replace_reload_after_analysis):
+            result = self.run_report()
+        self.assertFalse(result["passed"])
+        self.assertEqual(self.exit_code, 1)
+        comparison = result["same_host_comparisons"][0]
+        self.assertFalse(comparison["sample_exact"])
+        self.assertEqual(comparison["second_sha256"], captured_hash)
+        self.assertEqual(result["renders"][1]["sha256"], captured_hash)
+        self.assertNotEqual(hashlib.sha256(after.read_bytes()).hexdigest(), captured_hash)
+
+    def test_replaced_tail_file_cannot_hide_original_nonzero_tail(self):
+        self.write_float_wave(overrides={6101: 0.001})
+        captured_hash = hashlib.sha256(self.tail_file.read_bytes()).hexdigest()
+        original_analyse = report.analyse
+
+        def replace_tail_after_analysis(path, **kwargs):
+            result = original_analyse(path, **kwargs)
+            self.write_float_wave(path=path)
+            return result
+
+        with patch.object(report, "analyse", side_effect=replace_tail_after_analysis):
+            result = self.run_report()
+        self.assertFalse(result["passed"])
+        self.assertFalse(result["tail_check"]["tail_exactly_zero"])
+        self.assertEqual(result["tail_check"]["sha256"], captured_hash)
+
+    def test_finite_float64_metric_overflow_replaces_previous_pass(self):
+        self.write_float_wave(seconds=1, path=self.cubase / report.REVERSE_BASE)
+        after = self.write_float_wave(seconds=1, path=self.cubase / report.REVERSE_RELOAD)
+        previous = self.run_report()
+        self.assertTrue(previous["passed"])
+        self.write_float_wave(seconds=1, overrides={10: 1e308}, path=after, bits=64)
+        result = self.run_report()
+        self.assertFalse(result["passed"])
+        self.assertFalse(result["analysis_completed"])
+        self.assertEqual(self.exit_code, 1)
+        self.assertNotEqual(result["run_id"], previous["run_id"])
+        self.assertEqual(result["input_errors"][0]["stage"], "signal")
+        json.dumps(result, allow_nan=False)
+
+    def test_finite_comparison_metric_overflow_is_reported(self):
+        # Each input's sum of squares is finite; their difference's sum overflows.
+        for name, value in ((report.REVERSE_BASE, 1e154), (report.REVERSE_RELOAD, -1e154)):
+            self.write_float_wave(seconds=0.01, channels=1, bits=64, overrides={0: value},
+                                  path=self.cubase / name)
+        result = self.run_report()
+        self.assertFalse(result["passed"])
+        self.assertFalse(result["analysis_completed"])
+        self.assertEqual(result["input_errors"][0]["stage"], "comparison")
+        json.dumps(result, allow_nan=False)
+
+    def test_each_wave_is_read_once_and_comparison_hashes_match_renders(self):
+        for name, seconds in ((report.SUB_BASE, 16), (report.SUB_TAIL, 18),
+                              (report.SUB_RELOAD, 36), (report.REVERSE_BASE, 1),
+                              (report.REVERSE_RELOAD, 1), ("standalone.wav", 1)):
+            self.write_float_wave(seconds=seconds, path=self.cubase / name)
+        original_read = Path.read_bytes
+        reads = []
+
+        def count_read(path):
+            reads.append(path.name)
+            return original_read(path)
+
+        with patch.object(Path, "read_bytes", count_read):
+            result = self.run_report("--require-recall", "both")
+        self.assertTrue(result["passed"])
+        self.assertCountEqual(reads, [report.SUB_BASE, report.SUB_TAIL, report.SUB_RELOAD,
+                                     report.REVERSE_BASE, report.REVERSE_RELOAD, "standalone.wav"])
+        hashes = {record["path"]: record["sha256"] for record in result["renders"]}
+        for comparison in result["same_host_comparisons"]:
+            self.assertEqual(comparison["first_sha256"], hashes[comparison["first"]])
+            self.assertEqual(comparison["second_sha256"], hashes[comparison["second"]])
 
     def test_misnamed_short_file_cannot_claim_full_tail(self):
         self.write_float_wave(seconds=1)

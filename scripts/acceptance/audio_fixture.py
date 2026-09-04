@@ -85,8 +85,10 @@ def generate():
     print(json.dumps({"wav": str(wavpath), "midi": str(midpath), "seconds": DURATION, "sample_rate": RATE}, indent=2))
 
 
-def read_audio(path):
-    blob = Path(path).read_bytes()
+def read_audio(path, *, blob=None):
+    """Decode supplied immutable WAV bytes, or read the path for standalone use."""
+    if blob is None:
+        blob = Path(path).read_bytes()
     if blob[:4] != b"RIFF" or blob[8:12] != b"WAVE":
         raise ValueError("Expected RIFF WAVE (not RF64/compressed audio)")
     if struct.unpack_from("<I", blob, 4)[0] + 8 > len(blob):
@@ -132,8 +134,8 @@ def db(value):
     return 20 * math.log10(value) if value > 0 else None
 
 
-def analyse(path):
-    metadata, samples = read_audio(path)
+def analyse(path, *, blob=None):
+    metadata, samples = read_audio(path, blob=blob)
     finite = [s for s in samples if math.isfinite(s)]
     metric_samples = [s if math.isfinite(s) else 0.0 for s in samples]
     channels, rate = metadata["channels"], metadata["sample_rate"]
@@ -154,9 +156,9 @@ def analyse(path):
     return metadata
 
 
-def compare(first, second, seconds=None):
-    a, av = read_audio(first)
-    b, bv = read_audio(second)
+def compare(first, second, seconds=None, *, first_blob=None, second_blob=None):
+    a, av = read_audio(first, blob=first_blob)
+    b, bv = read_audio(second, blob=second_blob)
     compatible = all(a[k] == b[k] for k in ("sample_rate", "channels"))
     if seconds is None:
         compatible = compatible and a["frames"] == b["frames"]
@@ -166,7 +168,8 @@ def compare(first, second, seconds=None):
         frames = round(seconds * a["sample_rate"])
         compatible = compatible and min(a["frames"], b["frames"]) >= frames
         av, bv = av[:frames * a["channels"]], bv[:frames * b["channels"]]
-    result = {"first": a["path"], "second": b["path"], "compatible": compatible}
+    result = {"first": a["path"], "second": b["path"], "compatible": compatible,
+              "first_sha256": a["sha256"], "second_sha256": b["sha256"]}
     if compatible:
         result["samples_finite"] = all(math.isfinite(value) for value in av) and all(math.isfinite(value) for value in bv)
         if not result["samples_finite"]:

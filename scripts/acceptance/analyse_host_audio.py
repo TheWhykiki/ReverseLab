@@ -32,6 +32,15 @@ def input_error(stage, paths, error):
             "error_type": type(error).__name__, "message": str(error)}
 
 
+def checked_metrics(measurement):
+    """Reject overflowed derived metrics before they can enter a report."""
+    try:
+        json.dumps(measurement, allow_nan=False)
+    except ValueError as error:
+        raise ValueError("Computed audio metrics are nonfinite (numeric overflow); evidence cannot be evaluated") from error
+    return measurement
+
+
 def recall_tolerance(value):
     tolerance = float(value)
     if not math.isfinite(tolerance) or tolerance < 0:
@@ -39,7 +48,7 @@ def recall_tolerance(value):
     return tolerance
 
 
-def check_comparisons(root, tolerance, required_plugins, files, input_errors):
+def check_comparisons(root, tolerance, required_plugins, files, input_errors, evidence_bytes):
     """Gate every available pair and report recall coverage for each plugin separately."""
     available = {path.name for path in files}
     invalid = {Path(path).name for error in input_errors for path in error["paths"]}
@@ -52,11 +61,13 @@ def check_comparisons(root, tolerance, required_plugins, files, input_errors):
             comparison.update(input_error=True, reason="Cannot compare invalid or unreadable WAV evidence; see input_errors")
         else:
             try:
-                comparison = (fixture_onset_comparison(root / before, root / after, seconds)
-                              if seconds is not None else compare(root / before, root / after))
+                blobs = {"first_blob": evidence_bytes[before], "second_blob": evidence_bytes[after]}
+                comparison = checked_metrics(
+                    fixture_onset_comparison(root / before, root / after, seconds, **blobs)
+                    if seconds is not None else compare(root / before, root / after, **blobs))
             except AUDIO_READ_ERRORS as error:
                 input_errors.append(input_error("comparison", (root / before, root / after), error))
-                comparison.update(input_error=True, reason="Could not read WAV evidence during comparison; see input_errors")
+                comparison.update(input_error=True, reason="Could not evaluate WAV comparison; see input_errors")
         comparison.update(plugin=plugin, purpose=purpose, required_seconds=seconds,
                           max_allowed_absolute_difference=tolerance)
         if comparison.get("input_error"):
@@ -95,12 +106,12 @@ def check_comparisons(root, tolerance, required_plugins, files, input_errors):
                          "required_plugins": required_plugins, "plugins": plugins}
 
 
-def fixture_onset_comparison(first, second, seconds):
-    result = compare(first, second, seconds=seconds)
+def fixture_onset_comparison(first, second, seconds, *, first_blob, second_blob):
+    result = compare(first, second, seconds=seconds, first_blob=first_blob, second_blob=second_blob)
     if not result["compatible"] or not result.get("samples_finite", False):
         return result
-    a, av = read_audio(first)
-    _, bv = read_audio(second)
+    a, av = read_audio(first, blob=first_blob)
+    _, bv = read_audio(second, blob=second_blob)
     outside_max, outside_square, outside_count = 0.0, 0.0, 0
     for i in range(round(seconds * a["sample_rate"]) * a["channels"]):
         t = (i // a["channels"]) / a["sample_rate"]
@@ -119,9 +130,9 @@ def fixture_onset_comparison(first, second, seconds):
     return result
 
 
-def check_tail(path, expected_seconds=36.0, silence_start=30.0):
+def check_tail(path, expected_seconds=36.0, silence_start=30.0, *, blob=None):
     """Verify this fixture's full capture and each tail sample, never its filename alone."""
-    metadata, samples = read_audio(path)
+    metadata, samples = read_audio(path, blob=blob)
     rate, channels = metadata["sample_rate"], metadata["channels"]
     expected_frames = round(expected_seconds * rate)
     start_frame = round(silence_start * rate)
@@ -174,11 +185,19 @@ def main():
         files = []
         errors.append(input_error("discovery", (root,), error))
     records = []
+    evidence_bytes = {}
+    comparison_files = {name for _, _, before, after, _ in COMPARISONS for name in (before, after)}
     for path in files:
         try:
-            records.append(analyse(path))
+            blob = path.read_bytes()
+            if path.name in comparison_files:
+                evidence_bytes[path.name] = blob
+            records.append(checked_metrics(analyse(path, blob=blob)))
         except AUDIO_READ_ERRORS as error:
             errors.append(input_error("signal", (path,), error))
+        finally:
+            # Keep bytes only for the five recognized comparison/tail files.
+            blob = None
     result = {"run_id": uuid.uuid4().hex, "analysed_at_utc": datetime.now(timezone.utc).isoformat(),
               "directory": str(root), "renders": records, "input_errors": errors,
               "limits": ["No cross-host waveform equality is asserted: settings and sample rates differ.",
@@ -190,10 +209,12 @@ def main():
                         else [args.require_recall] if args.require_recall else [])
     result["recall_tolerance"] = args.recall_tolerance
     result["same_host_comparisons"], result["recall_check"] = check_comparisons(
-        root, args.recall_tolerance, required_plugins, files, errors)
+        root, args.recall_tolerance, required_plugins, files, errors, evidence_bytes)
     if (root / SUB_RELOAD) in files:
         try:
-            result["tail_check"] = check_tail(root / SUB_RELOAD)
+            if SUB_RELOAD not in evidence_bytes:
+                raise ValueError("Tail evidence could not be read during input capture")
+            result["tail_check"] = check_tail(root / SUB_RELOAD, blob=evidence_bytes[SUB_RELOAD])
         except AUDIO_READ_ERRORS as error:
             errors.append(input_error("tail", (root / SUB_RELOAD,), error))
             result["tail_check"] = {"path": str(root / SUB_RELOAD), "passed": False,

@@ -9,6 +9,11 @@ WAVs, and errors reading a present host summary produce a current **FAIL**
 report and exit `1`. Readable WAVs are still analyzed; input errors cannot be
 silently omitted from the overall result.
 
+Nonfinite **computed metrics** also fail the current run explicitly. Very large
+but finite Float64 samples can overflow RMS calculations even though the WAV
+can be decoded. Such a measurement is recorded as an evaluation error;
+infinite metrics are never published or silently converted to zero.
+
 Each report includes a unique `run_id` and `analysed_at_utc` timestamp. The
 JSON report, Markdown report, and CLI summary share that identity. A later
 failed evidence run replaces an earlier passing report in the selected output
@@ -16,6 +21,27 @@ directory. For an audit trail, choose a new `--output-directory` for each run.
 Always check the process exit code: invalid CLI arguments and output write
 failures cannot guarantee a fresh report. If a write fails partway through,
 report files can belong to different runs; check their `run_id` values.
+
+Each WAV is read into immutable bytes once per run. Signal metrics, comparisons,
+onset diagnostics and the tail check use those same bytes. A comparison's
+`first_sha256` and `second_sha256` identify the measured content and match the
+corresponding render hashes. Changes to the original files after capture do
+not change subsequent calculations in that run. Hashes refer to captured
+content, not necessarily to files currently present at the paths.
+
+This is not an atomic snapshot of all files, and no file locks are taken.
+Finish DAW exports before analysis and retain the original evidence. Concurrent
+in-place writes during a read can still yield an incomplete or mixed capture;
+decoding detects malformed input but cannot prove that a valid-looking capture
+came from one complete export. Capturing files also cannot establish that a
+DAW project was actually reopened.
+
+Only the five recognized comparison/tail WAVs retain their raw bytes until
+analysis finishes. Other WAV bytes are released after their signal analysis.
+The additional cache uses roughly the sum of those five file sizes (about
+52 MiB for the protocol's 48 kHz stereo Float32 exports, including optional
+`03`), in addition to temporary decoded sample arrays. There is no fixed file
+size limit; very long exports require more memory. Use one case per directory.
 
 From the repository root:
 
@@ -77,12 +103,13 @@ The JSON report contains the detailed measurements. Its CLI summary and Markdown
 also expose the run identity, scope and outcome:
 
 - `analysis_completed`: false when evidence is missing from an empty directory,
-  cannot be read, or fails to decode. This is separate from the quality of audio
+  cannot be read, fails to decode, or produces nonfinite computed metrics.
+  This is separate from the quality of audio
   that could be measured. A measurable waveform mismatch completes analysis
   but fails acceptance.
-- `input_errors`: each read/decoding failure with its stage, absolute paths,
-  error type and message. An unreadable comparison has `compatible: null`
-  because compatibility could not be measured; it still fails the comparison.
+- `input_errors`: each read, decoding or computation failure with its stage,
+  absolute paths, error type and message. A comparison that could not be
+  evaluated has `compatible: null`; it still fails the comparison.
 - `signal_checks_passed`: all WAVs contain finite, non-silent audio without
   full-scale samples, using the existing signal criteria.
 - `comparison_checks_passed`: all available comparisons passed; `null` when

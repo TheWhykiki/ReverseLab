@@ -5,6 +5,7 @@ from pathlib import Path
 import plistlib
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -34,6 +35,9 @@ class FakeTools:
         if self.fail == tool:
             raise subprocess.CalledProcessError(1, parts)
         output = ""
+        if any(Path(part).name == "generate-presets.py" for part in parts[1:]):
+            # Exercise the actual generator against the actual staged inputs.
+            return subprocess.run(parts, cwd=cwd, check=True, text=True, capture_output=True)
         if tool == "cmake" and "-S" in parts:
             self.source = Path(parts[parts.index("-S") + 1])
         elif tool == "cmake" and "--build" in parts:
@@ -83,6 +87,11 @@ class ReleasePipelineTests(unittest.TestCase):
         (self.root / "Source").mkdir()
         (self.root / "CMakeLists.txt").write_text("project(ReverseLab VERSION 1.0.4 LANGUAGES C CXX)\n")
         (self.root / "Source/processor.cpp").write_text("current source\n")
+        repository = Path(__file__).resolve().parents[2]
+        for relative in ("scripts/generate-presets.py", "Presets/FactoryPresets.json", "Source/FactoryBank.h"):
+            target = self.root / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(repository / relative, target)
         (self.root / ".gitignore").write_text("/dist/\n/.release-candidate-*/\n")
         for command in (["git", "init", "-q"], ["git", "add", "."],
                         ["git", "-c", "user.name=Pipeline Test", "-c", "user.email=pipeline@example.invalid",
@@ -123,6 +132,20 @@ class ReleasePipelineTests(unittest.TestCase):
             with self.subTest(tool=tool):
                 with self.assertRaises(subprocess.CalledProcessError):
                     self.package(FakeTools(fail=tool))
+                self.assertPreviousPreserved()
+
+    def test_stale_factory_recipe_fails_before_build_and_preserves_previous_artifacts(self):
+        recipes = self.root / "Presets/FactoryPresets.json"
+        data = json.loads(recipes.read_text())
+        data["presets"][0]["name"] = "Changed recipe without regenerated header"
+        recipes.write_text(json.dumps(data))
+        for optimization in ("", "1", "2"):
+            with self.subTest(optimization=optimization), patch.dict(pipeline.os.environ, {"PYTHONOPTIMIZE": optimization}):
+                tools = FakeTools()
+                with self.assertRaises(subprocess.CalledProcessError) as raised:
+                    self.package(tools)
+                self.assertIn("FactoryBank.h is stale", raised.exception.stderr)
+                self.assertFalse(any(Path(command[0]).name == "cmake" for command in tools.commands))
                 self.assertPreviousPreserved()
 
     def test_wrong_bundle_version_or_architecture_never_publishes(self):
@@ -166,6 +189,10 @@ class ReleasePipelineTests(unittest.TestCase):
         self.assertEqual(self.previous.read_bytes(), b"keep previous release")
         self.assertFalse((candidate / "build/stale.vst3").exists())
         commands = [Path(command[0]).name for command in tools.commands]
+        self.assertEqual(tools.commands[0][0], sys.executable)
+        self.assertEqual(tools.commands[0][1], "-I")
+        self.assertEqual(Path(tools.commands[0][2]).name, "generate-presets.py")
+        self.assertEqual(tools.commands[0][3:], ["--check"])
         self.assertLess(commands.index("ctest"), commands.index("pkgbuild"))
         self.assertEqual(commands.count("ReverseLabHostTests"), 2)
         self.assertTrue((candidate / "ctest-results.xml").is_file())
@@ -184,7 +211,7 @@ class ReleasePipelineTests(unittest.TestCase):
         self.assertNotEqual(first["source_sha256"], second["source_sha256"])
         self.assertNotEqual(second["source_sha256"], third["source_sha256"])
         self.assertIn("Tests/new_test.cpp", [record["path"] for record in third["files"]])
-        (self.root / "Presets").mkdir()
+        (self.root / "Presets").mkdir(exist_ok=True)
         (self.root / "Presets/new-preset.json").write_text('{"name":"new"}\n')
         _, fourth = pipeline.source_inputs(self.root)
         self.assertNotEqual(third["source_sha256"], fourth["source_sha256"])

@@ -15,6 +15,7 @@ import plistlib
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 
 
@@ -181,6 +182,10 @@ def package_release(root, configuration="Release", version_override=None, enviro
         provenance = snapshot_source(root, source)
         if validate_options(source, configuration, version_override, environment)[0] != version:
             raise ReleaseError("Project version changed while taking the source snapshot")
+        # Compiled preset tests cannot detect JSON edits absent from FactoryBank.h.
+        # Check the immutable snapshot, not the live checkout, before any build.
+        # Ignore PYTHONOPTIMIZE so the generator's assertions cannot be disabled.
+        runner([sys.executable, "-I", source / "scripts/generate-presets.py", "--check"])
         build = stage / "build"
         runner(["cmake", "-S", source, "-B", build, "-G", "Unix Makefiles", "-DCMAKE_BUILD_TYPE=Release"])
         # Build the default target so every registered CTest executable is built,
@@ -243,7 +248,7 @@ def package_release(root, configuration="Release", version_override=None, enviro
                     "dirty": any(repo["dirty"] for repo in provenance["repositories"]),
                     "built_binary_sha256": built_hash, "packaged_binary_sha256": packaged_hash,
                     "application_signed": bool(app), "installer_signed": bool(installer), "notarized": bool(notary),
-                    "verification": ["fresh_snapshot_build", "ctest", "zip_host_state_audio_roundtrip",
+                    "verification": ["generated_factory_bank_matches_snapshot", "fresh_snapshot_build", "ctest", "zip_host_state_audio_roundtrip",
                                      "installer_payload_host_state_audio_roundtrip", "both_macos11_slices"],
                     "artifacts": {path.name: file_hash(path) for path in sorted(artifacts.iterdir())}}
         write_json(artifacts / "release-manifest.json", manifest)

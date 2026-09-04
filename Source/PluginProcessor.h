@@ -1,4 +1,5 @@
 #pragma once
+#include "PresetLibrary.h"
 
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <cstdint>
@@ -8,7 +9,7 @@
 class ReverseLabAudioProcessor final : public juce::AudioProcessor, private juce::Timer
 {
 public:
-    ReverseLabAudioProcessor();
+    explicit ReverseLabAudioProcessor(juce::File presetStorage = {});
     ~ReverseLabAudioProcessor() override;
 
     void prepareToPlay(double sampleRate, int samplesPerBlock) override;
@@ -28,7 +29,7 @@ public:
         return parameters.getParameter(rl::params::bypass);
     }
 
-    int getNumPrograms() override { return 6; }
+    int getNumPrograms() override;
     int getCurrentProgram() override { return currentProgram.load(std::memory_order_acquire); }
     void setCurrentProgram(int) override;
     const juce::String getProgramName(int) override;
@@ -38,6 +39,7 @@ public:
     void setStateInformation(const void*, int) override;
 
     juce::AudioProcessorValueTreeState parameters;
+    wk::PresetLibrary presets;
     [[nodiscard]] int getCurrentLatencySamples() const noexcept { return displayedLatency.load(); }
     [[nodiscard]] float getScopeSample(int channel, int index) const noexcept;
     [[nodiscard]] int getScopeWriteIndex() const noexcept { return scopeWrite.load(); }

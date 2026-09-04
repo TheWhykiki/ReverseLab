@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(ReverseLab VERSION 1.0.4 LANGUAGES C CXX)
+project(ReverseLab VERSION 1.1.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -94,3 +94,15 @@ target_link_libraries(ReverseLabRenderAB PRIVATE
     juce::juce_dsp
     PUBLIC juce::juce_recommended_config_flags
            juce::juce_recommended_warning_flags)
+
+# Preset persistence and complete factory-bank audio checks.
+juce_add_console_app(ReverseLabPresetTests PRODUCT_NAME "ReverseLab Preset Tests")
+target_sources(ReverseLabPresetTests PRIVATE Tests/PresetTests.cpp Source/PluginProcessor.cpp Source/PluginEditor.cpp Source/ReverseEngine.cpp)
+target_include_directories(ReverseLabPresetTests PRIVATE Source)
+target_compile_definitions(ReverseLabPresetTests PRIVATE
+    JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_VST3_CAN_REPLACE_VST2=0
+    JUCE_MODAL_LOOPS_PERMITTED=1 PRESET_TEST_SUBLAB=0 JucePlugin_Name="ReverseLab"
+    REVERSELAB_RELEASE_CHANNEL="Stable" REVERSELAB_VERSION_STRING="${PROJECT_VERSION}")
+target_link_libraries(ReverseLabPresetTests PRIVATE juce::juce_audio_utils juce::juce_dsp
+    PUBLIC juce::juce_recommended_config_flags juce::juce_recommended_warning_flags)
+add_test(NAME ReverseLabPresets COMMAND ReverseLabPresetTests)

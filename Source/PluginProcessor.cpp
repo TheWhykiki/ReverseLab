@@ -1,12 +1,14 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include "FactoryBank.h"
 #include <algorithm>
 #include <cmath>
 
-ReverseLabAudioProcessor::ReverseLabAudioProcessor()
+ReverseLabAudioProcessor::ReverseLabAudioProcessor(juce::File presetStorage)
     : AudioProcessor(BusesProperties().withInput("Input", juce::AudioChannelSet::stereo(), true)
                                       .withOutput("Output", juce::AudioChannelSet::stereo(), true)),
-      parameters(*this, nullptr, "ReverseLabState", rl::params::createLayout())
+      parameters(*this, nullptr, "ReverseLabState", rl::params::createLayout()),
+      presets(*this, parameters, "ReverseLab", factoryBank(), std::move(presetStorage))
 {
     for (auto& channel : scope)
         for (auto& value : channel)
@@ -452,11 +454,11 @@ juce::AudioProcessorEditor* ReverseLabAudioProcessor::createEditor()
     return new ReverseLabAudioProcessorEditor(*this);
 }
 
+int ReverseLabAudioProcessor::getNumPrograms() { return static_cast<int>(factoryBank().size()); }
+
 const juce::String ReverseLabAudioProcessor::getProgramName(int index)
 {
-    static const juce::StringArray names { "Clean Reverse", "Stereo Drift", "Frozen Texture",
-                                           "Feedback Rise", "Chopped Eighths", "Wide Triplets" };
-    return juce::isPositiveAndBelow(index, names.size()) ? names[index] : juce::String {};
+    return juce::isPositiveAndBelow(index, getNumPrograms()) ? factoryBank()[static_cast<size_t>(index)].name : juce::String {};
 }
 
 void ReverseLabAudioProcessor::setPlainParameter(const char* id, float plainValue)
@@ -487,29 +489,9 @@ void ReverseLabAudioProcessor::applyProgramChange(int program)
 {
     const juce::ScopedValueSetter<bool> applyingChange(applyingProgramChange, true);
     const auto previousProgram = currentProgram.exchange(program, std::memory_order_acq_rel);
-    setPlainParameter(rl::params::sync, 1.0f); setPlainParameter(rl::params::link, 1.0f);
-    setPlainParameter(rl::params::leftSize, 8.0f); setPlainParameter(rl::params::rightSize, 8.0f);
-    setPlainParameter(rl::params::leftFreeMs, 500.0f); setPlainParameter(rl::params::rightFreeMs, 500.0f);
-    setPlainParameter(rl::params::speed, 1.0f); setPlainParameter(rl::params::crossfade, 4.0f);
-    setPlainParameter(rl::params::mix, 100.0f); setPlainParameter(rl::params::feedback, 0.0f);
-    setPlainParameter(rl::params::freeze, 0.0f); setPlainParameter(rl::params::stereoOffset, 0.0f);
-    setPlainParameter(rl::params::random, 0.0f); setPlainParameter(rl::params::highpass, 20.0f);
-    setPlainParameter(rl::params::lowpass, 20000.0f); setPlainParameter(rl::params::output, 0.0f);
-    setPlainParameter(rl::params::retrigger, 0.0f); setPlainParameter(rl::params::bypass, 0.0f);
-    setPlainParameter(rl::params::seed, 4242.0f);
-    switch (program)
-    {
-        case 1: setPlainParameter(rl::params::link, 0.0f); setPlainParameter(rl::params::rightSize, 9.0f);
-                setPlainParameter(rl::params::stereoOffset, 35.0f); setPlainParameter(rl::params::random, 18.0f); break;
-        case 2: setPlainParameter(rl::params::freeze, 1.0f); setPlainParameter(rl::params::lowpass, 6800.0f); break;
-        case 3: setPlainParameter(rl::params::feedback, 72.0f); setPlainParameter(rl::params::mix, 76.0f);
-                setPlainParameter(rl::params::highpass, 110.0f); break;
-        case 4: setPlainParameter(rl::params::leftSize, 5.0f); setPlainParameter(rl::params::rightSize, 5.0f);
-                setPlainParameter(rl::params::crossfade, 1.5f); break;
-        case 5: setPlainParameter(rl::params::link, 0.0f); setPlainParameter(rl::params::leftSize, 7.0f);
-                setPlainParameter(rl::params::rightSize, 10.0f); setPlainParameter(rl::params::stereoOffset, 62.0f); break;
-        default: break;
-    }
+    presets.clearSelection();
+    for (const auto& [id, value] : factoryBank()[static_cast<size_t>(program)].values)
+        setPlainParameter(id.toRawUTF8(), value);
     if (program != previousProgram)
         updateHostDisplay(ChangeDetails().withProgramChanged(true));
 }
@@ -517,6 +499,7 @@ void ReverseLabAudioProcessor::applyProgramChange(int program)
 void ReverseLabAudioProcessor::getStateInformation(juce::MemoryBlock& destination)
 {
     auto state = parameters.copyState();
+    presets.appendSelection(state);
     const auto savedSize = getLastEditorSize();
     state.setProperty("program", currentProgram.load(std::memory_order_acquire), nullptr);
     state.setProperty("editorWidth", savedSize.x, nullptr);
@@ -541,6 +524,7 @@ void ReverseLabAudioProcessor::setStateInformation(const void* data, int size)
                 460, 920, static_cast<int>(state.getProperty("editorHeight", 610)));
             setRestoredEditorSize(restoredWidth, restoredHeight);
             parameters.replaceState(state);
+            presets.restoreSelection(state);
             processingResetRequested.store(true, std::memory_order_release);
             if (auto* messageManager = juce::MessageManager::getInstanceWithoutCreating();
                 messageManager != nullptr && messageManager->isThisTheMessageThread())

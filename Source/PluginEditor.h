@@ -68,6 +68,7 @@ private:
     juce::Label title, subtitle, latencyLabel, leftSizeLabel, rightSizeLabel;
     juce::Slider leftSize, rightSize, leftFreeTime, rightFreeTime;
     wk::PresetBar presetBar;
+    juce::TextButton updates;
     juce::ToggleButton sync, link, freeze, retrigger, bypass;
     std::array<Knob, 10> knobs;
     std::unique_ptr<SliderAttachment> leftSizeAttachment, rightSizeAttachment;

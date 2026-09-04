@@ -1,4 +1,5 @@
 #include "PluginEditor.h"
+#include "UpdaterLauncher.h"
 #include <cmath>
 
 namespace
@@ -201,6 +202,8 @@ ReverseLabAudioProcessorEditor::ReverseLabAudioProcessorEditor(ReverseLabAudioPr
     freeze.setDescription("Hold the current reverse buffer");
     retrigger.setDescription("Restart the reverse section momentarily");
     addAndMakeVisible(presetBar);
+    wk::configureUpdaterButton(updates, "ReverseLab", REVERSELAB_VERSION_STRING);
+    addAndMakeVisible(updates);
     startTimerHz(10);
     showingSyncValues = pluginProcessor.parameters.getRawParameterValue(rl::params::sync)->load() > 0.5f;
     leftSize.setVisible(showingSyncValues); rightSize.setVisible(showingSyncValues);
@@ -324,6 +327,7 @@ void ReverseLabAudioProcessorEditor::resized()
     title.setBounds(header.removeFromLeft(compact ? 150 : 185));
     subtitle.setVisible(!compact);
     if (!compact) subtitle.setBounds(header.removeFromLeft(130).withTrimmedTop(5));
+    updates.setBounds(header.removeFromRight(88).reduced(2, 7));
     bypass.setBounds(header.removeFromRight(compact ? 66 : 76).reduced(2, 7));
     latencyLabel.setBounds(header.removeFromRight(compact ? 116 : 150));
     link.setBounds(header.removeFromRight(compact ? 66 : 78).reduced(2, 7));

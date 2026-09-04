@@ -164,3 +164,9 @@ User presets are stored separately for ReverseLab, in the JUCE user application 
 The DAW project also stores current unsaved edits and the user preset name, independently of the library files.
 
 See [the full preset catalogue](Presets/CATALOG.md) and [the implementation and acceptance plan](PRESET_PLAN.md).
+
+## Native Updates
+
+Die Schaltfläche **Updates...** prüft neue Versionen, lädt das passende Paket und
+führt durch die Installation mit dem macOS-Installer. Details, Release-Anforderungen
+und Testgrenzen stehen in [UPDATER.md](UPDATER.md).

@@ -117,7 +117,7 @@ def source_inputs(root):
         tracked = git(repo, "ls-files", "--cached", "-z").split("\0")
         additional = git(repo, "ls-files", "--others", "--exclude-standard", "-z", "--",
                          "Source", "Tests", "scripts", "cmake", ".github", "CMakeLists.txt",
-                         "Presets", "Resources", "Assets").split("\0")
+                         "Presets", "Resources", "Assets", "Updater").split("\0")
         for name in sorted(set(tracked + additional) - {""}):
             relative = Path(name)
             if relative.is_absolute() or ".." in relative.parts:
@@ -198,6 +198,17 @@ def validate_bundle(bundle, version, runner):
         if re.findall(r"\bminos\s+(\S+)", output) != ["11.0"]:
             raise ReleaseError(f"Unexpected deployment target for {architecture}")
     runner(["codesign", "--verify", "--deep", "--strict", bundle])
+    helper = bundle / "Contents/Helpers/ReverseLabUpdater.app"
+    with (helper / "Contents/Info.plist").open("rb") as source:
+        updater_info = plistlib.load(source)
+    if (updater_info.get("CFBundleShortVersionString") != version
+            or updater_info.get("WKProduct") != "ReverseLab"):
+        raise ReleaseError("Embedded updater version/product does not match the plugin")
+    helper_binary = helper / "Contents/MacOS/ReverseLabUpdater"
+    if not os.access(helper_binary, os.X_OK):
+        raise ReleaseError("Missing executable updater")
+    if set(runner(["lipo", "-archs", helper_binary], capture=True).stdout.split()) != {"arm64", "x86_64"}:
+        raise ReleaseError("Embedded updater has incorrect architectures")
     return file_hash(binary)
 
 
@@ -334,7 +345,10 @@ def package_release(root, configuration="Release", version_override=None, enviro
         runner(["ditto", bundle, staged_bundle])
         diagnostics["step"] = "sign_bundle"
         if app:
-            runner(["codesign", "--force", "--options", "runtime", "--timestamp", "--sign", app, staged_bundle])
+            runner(["codesign", "--force", "--options", "runtime", "--timestamp", "--sign", app,
+                    staged_bundle / "Contents/Helpers/ReverseLabUpdater.app"])
+            runner(["codesign", "--force", "--options", "runtime", "--timestamp", "--sign", app,
+                    staged_bundle])
         else:
             print("Warning: ad-hoc VST3 and unsigned installer; no notarization claim.")
             runner(["codesign", "--force", "--sign", "-", staged_bundle])
@@ -346,8 +360,13 @@ def package_release(root, configuration="Release", version_override=None, enviro
         shutil.copy2(test_report, artifacts / "ctest-results.xml")
         shutil.copy2(build / "Testing/Temporary/LastTest.log", artifacts / "CTest-LastTest.log")
         package = artifacts / f"ReverseLab-{version}-macOS-universal.pkg"
+        components = stage / "components.plist"
+        components.write_bytes(plistlib.dumps([{
+            "RootRelativeBundlePath": "Library/Audio/Plug-Ins/VST3/ReverseLab.vst3",
+            "BundleIsRelocatable": False, "BundleIsVersionChecked": True,
+            "BundleHasStrictIdentifier": True, "BundleOverwriteAction": "upgrade"}]))
         command = ["pkgbuild", "--root", payload, "--identifier", "audio.whykiki.reverselab.pkg",
-                   "--version", version, "--install-location", "/"]
+                   "--version", version, "--install-location", "/", "--component-plist", components]
         if installer:
             command += ["--sign", installer]
         diagnostics["step"] = "pkgbuild"

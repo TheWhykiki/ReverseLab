@@ -61,6 +61,13 @@ class FakeTools:
             binary.write_bytes((self.source / "Source/processor.cpp").read_bytes())
             binary.chmod(0o755)
             (bundle / "Contents/Info.plist").write_bytes(plistlib.dumps({"CFBundleShortVersionString": self.version}))
+            helper = bundle / "Contents/Helpers/ReverseLabUpdater.app"
+            helper_binary = helper / "Contents/MacOS/ReverseLabUpdater"
+            helper_binary.parent.mkdir(parents=True)
+            helper_binary.write_bytes(b"test updater")
+            helper_binary.chmod(0o755)
+            (helper / "Contents/Info.plist").write_bytes(plistlib.dumps({
+                "CFBundleShortVersionString": self.version, "WKProduct": "ReverseLab"}))
         elif tool == "ctest":
             Path(parts[parts.index("--output-junit") + 1]).write_text('<testsuite tests="1" failures="0"/>\n')
             test_log = Path(parts[parts.index("--test-dir") + 1]) / "Testing/Temporary/LastTest.log"
@@ -86,6 +93,11 @@ class FakeTools:
                 shutil.copytree(parts[1], parts[2])
         elif tool == "pkgbuild":
             self.payload = Path(parts[parts.index("--root") + 1])
+            components = plistlib.loads(Path(parts[parts.index("--component-plist") + 1]).read_bytes())
+            if components != [{"RootRelativeBundlePath": "Library/Audio/Plug-Ins/VST3/ReverseLab.vst3",
+                               "BundleIsRelocatable": False, "BundleIsVersionChecked": True,
+                               "BundleHasStrictIdentifier": True, "BundleOverwriteAction": "upgrade"}]:
+                raise AssertionError("Installer must never relocate the plugin")
             Path(parts[-1]).write_bytes(b"fake PKG")
         elif tool == "pkgutil":
             shutil.copytree(self.payload, Path(parts[-1]) / "Payload")
@@ -256,6 +268,18 @@ class ReleasePipelineTests(unittest.TestCase):
             with self.assertRaises(pipeline.ReleaseError):
                 self.package(tools)
             self.assertPreviousPreserved()
+
+    def test_missing_embedded_updater_never_publishes(self):
+        tools = FakeTools()
+        def remove_helper(command, **options):
+            result = tools(command, **options)
+            parts = [str(value) for value in command]
+            if parts[0] == "cmake" and "--build" in parts:
+                shutil.rmtree(Path(parts[2]) / "ReverseLab_artefacts/Release/VST3/ReverseLab.vst3/Contents/Helpers")
+            return result
+        with self.assertRaises(OSError):
+            self.package(remove_helper)
+        self.assertPreviousPreserved()
 
     def test_notary_invalid_status_never_publishes_even_if_command_exits_zero(self):
         tools = FakeTools(notary_status="Invalid")

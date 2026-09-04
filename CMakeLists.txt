@@ -97,6 +97,9 @@ target_link_libraries(ReverseLab PRIVATE
            juce::juce_recommended_lto_flags
            juce::juce_recommended_warning_flags)
 
+include(cmake/Updater.cmake)
+wk_add_updater(ReverseLab)
+
 if(APPLE)
     # JUCE creates moduleinfo.json after its first signing pass. Re-sign the completed bundle so
     # the generated metadata is covered by the final resource seal for every CMake generator.

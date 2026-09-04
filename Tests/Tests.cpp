@@ -2,9 +2,12 @@
 #include "PluginEditor.h"
 #include "PluginProcessor.h"
 #include "ReverseEngine.h"
+#include "FactoryBank.h"
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cstdio>
+#include <functional>
 #include <limits>
 #include <thread>
 #include <vector>
@@ -64,6 +67,144 @@ struct CascadingProgramHost final : juce::AudioProcessorListener
     ReverseLabAudioProcessor& processor;
     std::vector<int> programs;
 };
+
+// A processor listener models the host callback reached by setValueNotifyingHost,
+// not the later programChanged notification that the older cascade tests cover.
+struct ParameterCallbackHost final : juce::AudioProcessorListener
+{
+    ParameterCallbackHost(ReverseLabAudioProcessor& p, std::function<void(int)> callbackIn)
+        : processor(p), callback(std::move(callbackIn)) { processor.addListener(this); }
+    ~ParameterCallbackHost() override { processor.removeListener(this); }
+    void audioProcessorParameterChanged(juce::AudioProcessor*, int index, float) override
+    {
+        ++parameterNotifications;
+        ++depth;
+        maximumDepth = juce::jmax(maximumDepth, depth);
+        callback(index);
+        --depth;
+    }
+    void audioProcessorChanged(juce::AudioProcessor*, const ChangeDetails& details) override
+    { if (details.programChanged) ++programNotifications; }
+    ReverseLabAudioProcessor& processor;
+    std::function<void(int)> callback;
+    int parameterNotifications = 0, programNotifications = 0, depth = 0, maximumDepth = 0;
+};
+
+juce::MemoryBlock snapshot(ReverseLabAudioProcessor& processor)
+{
+    juce::MemoryBlock result;
+    processor.getStateInformation(result);
+    return result;
+}
+
+void restore(ReverseLabAudioProcessor& processor, const juce::MemoryBlock& state)
+{
+    processor.setStateInformation(state.getData(), static_cast<int>(state.getSize()));
+}
+
+juce::ValueTree stateTree(const juce::MemoryBlock& state)
+{
+    if (auto xml = juce::AudioProcessor::getXmlFromBinary(state.getData(), static_cast<int>(state.getSize())))
+        return juce::ValueTree::fromXml(*xml);
+    return {};
+}
+
+bool sameCompleteState(ReverseLabAudioProcessor& schema, const juce::MemoryBlock& actual,
+                       const juce::MemoryBlock& expected)
+{
+    const auto a = stateTree(actual), b = stateTree(expected);
+    if (! a.hasType("ReverseLabState") || ! b.hasType("ReverseLabState")
+        || a.getNumChildren() != b.getNumChildren()) return false;
+    for (const auto* property : { "program", "editorWidth", "editorHeight" })
+        if (! a.hasProperty(property) || ! b.hasProperty(property) || a[property] != b[property]) return false;
+    if (! a.getChildWithName("WkPresetSelection").isEquivalentTo(b.getChildWithName("WkPresetSelection")))
+        return false;
+    for (const auto& [id, ignored] : factoryBank().front().values)
+    {
+        juce::ignoreUnused(ignored);
+        const auto left = a.getChildWithProperty("id", id), right = b.getChildWithProperty("id", id);
+        if (! left.hasProperty("value") || ! right.hasProperty("value")) return false;
+        const auto x = static_cast<float>(left["value"]), y = static_cast<float>(right["value"]);
+        const auto& range = schema.parameters.getParameter(id)->getNormalisableRange();
+        if (! std::isfinite(x) || ! std::isfinite(y) || x < range.start || x > range.end
+            || y < range.start || y > range.end) return false;
+        // APVTS can retain a neighbouring floating representation of the same legal
+        // step. Compare exact parameter-grid values, never a widened float tolerance.
+        if (std::abs(range.snapToLegalValue(x) - range.snapToLegalValue(y)) > 0.0f) return false;
+    }
+    return true;
+}
+
+bool liveStateMatches(ReverseLabAudioProcessor& processor, const juce::MemoryBlock& expected, bool requireRaw = true)
+{
+    const auto tree = stateTree(expected);
+    if (! tree.hasType("ReverseLabState") || ! tree.hasProperty("program")
+        || ! tree.hasProperty("editorWidth") || ! tree.hasProperty("editorHeight")) return false;
+    const auto program = static_cast<int>(tree["program"]);
+    if (! juce::isPositiveAndBelow(program, processor.getNumPrograms()) || processor.getCurrentProgram() != program)
+        return false;
+    const auto size = processor.getLastEditorSize();
+    if (size.x != static_cast<int>(tree["editorWidth"]) || size.y != static_cast<int>(tree["editorHeight"])) return false;
+    for (const auto& [id, ignored] : factoryBank().front().values)
+    {
+        juce::ignoreUnused(ignored);
+        const auto child = tree.getChildWithProperty("id", id);
+        if (! child.hasProperty("value")) return false;
+        const auto* parameter = processor.parameters.getParameter(id);
+        const auto& range = parameter->getNormalisableRange();
+        const auto expectedValue = static_cast<float>(child["value"]);
+        const auto parameterValue = parameter->convertFrom0to1(parameter->getValue());
+        // Ranged values commit synchronously; APVTS raw is a notification-driven
+        // cache checked separately after the drain, never a relaxed comparison.
+        const auto raw = requireRaw ? processor.parameters.getRawParameterValue(id)->load() : parameterValue;
+        for (const auto value : { raw, parameterValue, expectedValue })
+            if (! std::isfinite(value) || value < range.start || value > range.end) return false;
+        if (std::abs(range.snapToLegalValue(raw) - range.snapToLegalValue(expectedValue)) > 0.0f
+            || std::abs(range.snapToLegalValue(parameterValue) - range.snapToLegalValue(expectedValue)) > 0.0f) return false;
+    }
+    const auto selected = tree.getChildWithName("WkPresetSelection");
+    const auto current = processor.presets.current();
+    if (! selected.isValid())
+        return current.id == factoryBank()[static_cast<size_t>(program)].id;
+    if (current.id != selected["id"].toString() || current.name != selected["name"].toString()
+        || current.category != selected["category"].toString() || current.description != selected["description"].toString()
+        || current.values.size() != factoryBank().front().values.size()) return false;
+    for (const auto& [id, value] : current.values)
+    {
+        const auto child = selected.getChildWithProperty("id", id);
+        if (! child.hasProperty("value") || ! std::isfinite(value)) return false;
+        const auto& range = processor.parameters.getParameter(id)->getNormalisableRange();
+        if (std::abs(range.snapToLegalValue(value) - range.snapToLegalValue(static_cast<float>(child["value"]))) > 0.0f)
+            return false;
+    }
+    return true;
+}
+
+void makeCustomState(ReverseLabAudioProcessor& processor, int program, bool alternate)
+{
+    processor.setCurrentProgram(program);
+    setParameter(processor, rl::params::bypass, alternate ? 0.0f : 1.0f);
+    setParameter(processor, rl::params::crossfade, alternate ? 7.0f : 11.0f);
+    setParameter(processor, rl::params::feedback, alternate ? 29.0f : 13.0f);
+    setParameter(processor, rl::params::mix, alternate ? 53.0f : 37.0f);
+    setParameter(processor, rl::params::output, alternate ? -7.0f : -11.0f);
+    processor.setLastEditorSize(alternate ? 1180 : 1040, alternate ? 780 : 680);
+    juce::ValueTree selection("WkPresetSelection"), state("ReverseLabState");
+    selection.setProperty("id", alternate ? "00000000000000000000000000000002"
+                                           : "00000000000000000000000000000001", nullptr);
+    selection.setProperty("name", alternate ? "Callback Z" : "Callback Y", nullptr);
+    selection.setProperty("category", "Regression", nullptr);
+    for (const auto& [id, ignored] : factoryBank().front().values)
+    {
+        juce::ignoreUnused(ignored);
+        juce::ValueTree parameter("PARAM");
+        parameter.setProperty("id", id, nullptr);
+        parameter.setProperty("value", processor.parameters.getRawParameterValue(id)->load(), nullptr);
+        selection.addChild(parameter, -1, nullptr);
+    }
+    state.addChild(selection, -1, nullptr);
+    processor.presets.restoreSelection(state); // Metadata fixture only; never writes a preset file.
+}
 
 // Click detector: tracks the largest sample-to-sample step of a signal. For a sine of amplitude A and
 // angular frequency w read at up to `speed` times real time, a clean signal never exceeds A * w * speed.
@@ -1430,15 +1571,496 @@ public:
     }
 };
 
+class StateTransactionTests final : public juce::UnitTest
+{
+public:
+    StateTransactionTests() : UnitTest("Control state transactions", "StateTransactions") {}
+
+    void runTest() override
+    {
+        beginTest("The first and every parameter callback capture the complete new state, never a partial preset");
+        // Explicit per-run storage even though these tests never invoke a file operation.
+        const auto root = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                              .getChildFile("reverselab-state-" + juce::Uuid().toString());
+        ReverseLabAudioProcessor target(root.getChildFile("target"));
+        target.setCurrentProgram(3);
+        ReverseLabAudioProcessor y(root.getChildFile("source-y")), z(root.getChildFile("source-z"));
+        makeCustomState(y, 2, false);
+        makeCustomState(z, 1, true);
+        const auto stateY = snapshot(y), stateZ = snapshot(z);
+        expect(stateTree(stateY).getChildWithName("WkPresetSelection").isValid(),
+               "The fixture must exercise user-selection metadata as well as all 19 parameters");
+
+        {
+            ReverseLabAudioProcessor processor(root.getChildFile("capture"));
+            makeCustomState(processor, 0, false);
+            const auto before = snapshot(processor);
+            const auto beforeTree = stateTree(before);
+            target.setLastEditorSize(static_cast<int>(beforeTree["editorWidth"]), static_cast<int>(beforeTree["editorHeight"]));
+            const auto completeProgram = snapshot(target);
+            std::vector<juce::MemoryBlock> captured;
+            int firstIndex = -1, programNoticesBeforeFirst = -1;
+            ParameterCallbackHost host(processor, [&](int index)
+            {
+                if (captured.empty()) { firstIndex = index; programNoticesBeforeFirst = host.programNotifications; }
+                captured.push_back(snapshot(processor));
+            });
+            processor.setCurrentProgram(3);
+            expectEquals(firstIndex, processor.parameters.getParameter(rl::params::bypass)->getParameterIndex());
+            expectEquals(programNoticesBeforeFirst, 0);
+            expectEquals(static_cast<int>(captured.size()), 19);
+            for (const auto& state : captured)
+                expect(sameCompleteState(processor, state, completeProgram), "Commit precedes notifications: every callback sees the exact complete new program");
+            // Preserve the dimensions across factory changes when comparing the committed state.
+            expect(sameCompleteState(processor, snapshot(processor), snapshot(target))
+                       && liveStateMatches(processor, snapshot(target)), "The completed preset must be fully published and live");
+            ReverseLabAudioProcessor recalled(root.getChildFile("capture-recalled"));
+            if (! captured.empty()) restore(recalled, captured.front());
+            expect(sameCompleteState(recalled, snapshot(recalled), completeProgram) && liveStateMatches(recalled, completeProgram),
+                   "A fresh processor recalls the same complete callback snapshot into its live parameters and metadata");
+        }
+
+        beginTest("A state restored in the first parameter callback wins over the old preset loop");
+        {
+            ReverseLabAudioProcessor processor(root.getChildFile("restore"));
+            int actions = 0, firstIndex = -1, programNoticesBeforeFirst = -1;
+            ParameterCallbackHost host(processor, [&](int index)
+            {
+                if (actions != 0) return;
+                ++actions;
+                firstIndex = index;
+                programNoticesBeforeFirst = host.programNotifications;
+                restore(processor, stateY);
+                expect(sameCompleteState(processor, snapshot(processor), stateY) && liveStateMatches(processor, stateY, false),
+                       "Restore must return with all authoritative parameters and metadata committed, before old callbacks finish");
+            });
+            processor.setCurrentProgram(3);
+            expectEquals(actions, 1);
+            expectEquals(firstIndex, processor.parameters.getParameter(rl::params::bypass)->getParameterIndex());
+            expectEquals(programNoticesBeforeFirst, 0);
+            expectEquals(host.maximumDepth, 1, "Only notifications are deferred; the restore itself commits without recursive listener traversal");
+            expect(sameCompleteState(processor, snapshot(processor), stateY) && liveStateMatches(processor, stateY),
+                   "All 19 live parameters, program, dimensions and selection belong to restored Y");
+            processor.servicePendingHostUpdatesForTesting();
+            expect(sameCompleteState(processor, snapshot(processor), stateY) && liveStateMatches(processor, stateY),
+                   "No stale request may undo the completed restore on the next tick");
+        }
+
+        beginTest("Two nested restores each commit synchronously; only their notifications may coalesce");
+        {
+            ReverseLabAudioProcessor processor(root.getChildFile("two-restores"));
+            target.setLastEditorSize(900, 610);
+            const auto completeProgram = snapshot(target);
+            juce::MemoryBlock afterFirst, afterSecond;
+            bool firstLive = false, secondLive = false;
+            std::vector<juce::MemoryBlock> callbackStates;
+            int actions = 0;
+            ParameterCallbackHost host(processor, [&](int)
+            {
+                callbackStates.push_back(snapshot(processor));
+                if (actions != 0) return;
+                ++actions;
+                restore(processor, stateY);
+                afterFirst = snapshot(processor);
+                firstLive = liveStateMatches(processor, stateY, false);
+                restore(processor, stateZ);
+                afterSecond = snapshot(processor);
+                secondLive = liveStateMatches(processor, stateZ, false);
+            });
+            processor.setCurrentProgram(3);
+            expectEquals(actions, 1);
+            expectEquals(host.maximumDepth, 1);
+            expect(sameCompleteState(processor, afterFirst, stateY) && firstLive, "The first nested restore must actually commit Y before returning");
+            expect(sameCompleteState(processor, afterSecond, stateZ) && secondLive, "The second nested restore must actually commit Z before returning");
+            expect(sameCompleteState(processor, snapshot(processor), stateZ) && liveStateMatches(processor, stateZ),
+                   "The second complete restore must survive the outer preset loop in both the snapshot and live state");
+            bool sawProgramCommit = false, sawFinalRestoreCommit = false;
+            for (const auto& captured : callbackStates)
+            {
+                const auto isProgram = sameCompleteState(processor, captured, completeProgram);
+                const auto isFinalRestore = sameCompleteState(processor, captured, stateZ);
+                sawProgramCommit = sawProgramCommit || isProgram;
+                sawFinalRestoreCommit = sawFinalRestoreCommit || isFinalRestore;
+                expect(isProgram || isFinalRestore,
+                       "Notifications observe only full currently committed states; obsolete Y notifications may coalesce");
+            }
+            expect(sawProgramCommit && sawFinalRestoreCommit, "The superseded generation must abort and actually replay the latest generation");
+        }
+
+        beginTest("A state-restore callback can request another state without a recursive APVTS traversal");
+        {
+            ReverseLabAudioProcessor processor(root.getChildFile("restore-from-restore"));
+            int actions = 0;
+            ParameterCallbackHost host(processor, [&](int)
+            {
+                if (actions++ == 0) restore(processor, stateZ);
+            });
+            restore(processor, stateY);
+            expectGreaterThan(actions, 0);
+            expectEquals(host.maximumDepth, 1);
+            expect(sameCompleteState(processor, snapshot(processor), stateZ) && liveStateMatches(processor, stateZ));
+        }
+
+        beginTest("A later same-program request is not an echo when an earlier restore is pending");
+        {
+            ReverseLabAudioProcessor processor(root.getChildFile("restore-then-program"));
+            bool action = false;
+            ParameterCallbackHost host(processor, [&](int)
+            {
+                if (action) return;
+                action = true;
+                restore(processor, stateY);
+                processor.setCurrentProgram(3); // A later explicit request, after Y has synchronously committed program 2.
+            });
+            processor.setCurrentProgram(3);
+            expect(action);
+            expect(sameCompleteState(processor, snapshot(processor), stateY) && liveStateMatches(processor, stateY),
+                   "The state request drains synchronously before the deferred program request");
+            processor.servicePendingHostUpdatesForTesting();
+            const auto expectedSize = stateTree(stateY);
+            target.setLastEditorSize(static_cast<int>(expectedSize["editorWidth"]), static_cast<int>(expectedSize["editorHeight"]));
+            const auto expected = snapshot(target);
+            expect(sameCompleteState(processor, snapshot(processor), expected) && liveStateMatches(processor, expected),
+                   "The later explicit program request must survive the echo guard and clear user selection on the next tick");
+        }
+
+        beginTest("A superseded program notification cannot let a host echo undo the queued restore");
+        {
+            ReverseLabAudioProcessor processor(root.getChildFile("restore-with-program-echo"));
+            EchoingProgramHost echo(processor);
+            processor.addListener(&echo);
+            const juce::ScopeGuard removeEcho { [&] { processor.removeListener(&echo); } };
+            bool action = false;
+            ParameterCallbackHost host(processor, [&](int)
+            {
+                if (action) return;
+                action = true;
+                restore(processor, stateY);
+            });
+            processor.setCurrentProgram(3);
+            expect(action);
+            expect(sameCompleteState(processor, snapshot(processor), stateY) && liveStateMatches(processor, stateY));
+            processor.servicePendingHostUpdatesForTesting();
+            processor.servicePendingHostUpdatesForTesting();
+            expectEquals(echo.programNotifications, 0, "A program already superseded by a queued restore must not be advertised to an echoing host");
+            expect(sameCompleteState(processor, snapshot(processor), stateY) && liveStateMatches(processor, stateY),
+                   "The queued restored sound must survive ordinary program notification echoes on later ticks");
+        }
+
+        beginTest("A restore cascade beyond one work quantum completes on later ticks without recursion or lost work");
+        {
+            ReverseLabAudioProcessor processor(root.getChildFile("bounded-echo"));
+            int lastObservedProgram = -1, requests = 0;
+            ParameterCallbackHost host(processor, [&](int)
+            {
+                const auto program = processor.getCurrentProgram();
+                if (program == lastObservedProgram) return;
+                lastObservedProgram = program;
+                // A test-side safety cap also keeps the unfixed implementation
+                // finite; it is deliberately greater than the processor's budget.
+                if (++requests < 96) restore(processor, program == 2 ? stateZ : stateY);
+            });
+            processor.setCurrentProgram(3);
+            const auto firstDrainSends = host.parameterNotifications;
+            expectGreaterThan(requests, 2, "The control must exercise an actual alternating cascade");
+            expect(requests <= 64, "One outer operation cannot drain an unlimited listener-generated restore chain");
+            expect(firstDrainSends <= 64, "A single drain must bound actual parameter sends, not merely restore requests");
+            expect(processor.hasPendingStateNotificationsForTesting(), "The finite cascade must exceed the first drain's quantum");
+            expectEquals(host.maximumDepth, 1);
+            for (int tick = 0; tick < 8 && requests < 96; ++tick)
+                processor.servicePendingHostUpdatesForTesting();
+            expectEquals(requests, 96, "Bounded work must resume and finish the finite cascade, not silently discard remaining restores");
+            processor.servicePendingHostUpdatesForTesting();
+            const auto finalState = snapshot(processor);
+            // Request 1 observes program3; even requests observe Y and odd ones Z.
+            // Request96 therefore ends exactly at Y, not either plausible state.
+            expect(sameCompleteState(processor, finalState, stateY) && liveStateMatches(processor, stateY),
+                   "The exact last request must win in all 19 values, program, size, selection and APVTS caches");
+            expect(! processor.hasPendingStateNotificationsForTesting(), "The final replay must consume the pending generation");
+            const auto finishedSends = host.parameterNotifications;
+            processor.servicePendingHostUpdatesForTesting();
+            expectEquals(requests, 96, "A later service tick must not resurrect a superseded generation");
+            expectEquals(host.parameterNotifications, finishedSends, "A fully drained generation must not send again");
+            logMessage("  first-drain parameter sends=" + juce::String(firstDrainSends)
+                       + "; completed requests=" + juce::String(requests)
+                       + "; final state=Y; pending=" + juce::String(processor.hasPendingStateNotificationsForTesting() ? 1 : 0));
+        }
+
+        beginTest("Independent control writers and a snapshot reader cannot publish mixed states");
+        {
+            ReverseLabAudioProcessor processor(root.getChildFile("concurrent-restores"));
+            restore(processor, stateY);
+            std::atomic<bool> start { false };
+            std::vector<juce::MemoryBlock> captured;
+            const auto write = [&](const juce::MemoryBlock& state)
+            {
+                while (! start.load(std::memory_order_acquire)) std::this_thread::yield();
+                for (int i = 0; i < 64; ++i) restore(processor, state);
+            };
+            std::thread firstWriter(write, std::cref(stateY));
+            std::thread secondWriter(write, std::cref(stateZ));
+            std::thread reader([&]
+            {
+                while (! start.load(std::memory_order_acquire)) std::this_thread::yield();
+                for (int i = 0; i < 256; ++i) captured.push_back(snapshot(processor));
+            });
+            start.store(true, std::memory_order_release);
+            firstWriter.join(); secondWriter.join(); reader.join();
+            processor.servicePendingHostUpdatesForTesting();
+            expectEquals(static_cast<int>(captured.size()), 256);
+            captured.push_back(snapshot(processor));
+            for (const auto& state : captured)
+                expect(sameCompleteState(processor, state, stateY) || sameCompleteState(processor, state, stateZ),
+                       "Concurrent capture may choose either whole state, never a mixture of program/parameters/size/selection");
+            expect(liveStateMatches(processor, stateY) || liveStateMatches(processor, stateZ),
+                   "The final live state must independently match a complete writer, not only a cached snapshot");
+        }
+
+        beginTest("An independent restore commits and returns while an older parameter callback is still active");
+        {
+            ReverseLabAudioProcessor processor(root.getChildFile("overlapping-controls"));
+            juce::WaitableEvent callbackEntered, writerFinished;
+            std::atomic<bool> writerReturned { false }, writerTimedOut { false };
+            juce::MemoryBlock captured;
+            std::thread writer([&]
+            {
+                if (! callbackEntered.wait(2000)) { writerTimedOut.store(true); return; }
+                restore(processor, stateY);
+                writerReturned.store(true);
+                writerFinished.signal();
+            });
+            bool action = false;
+            ParameterCallbackHost host(processor, [&](int)
+            {
+                if (action) return;
+                action = true;
+                callbackEntered.signal();
+                expect(writerFinished.wait(2000), "The writer must return while the old callback remains active, not wait on its listener lock");
+                expect(liveStateMatches(processor, stateY, false), "Authoritative live Y is observable before releasing the old callback");
+                std::thread reader([&] { captured = snapshot(processor); });
+                reader.join();
+                expect(writerReturned.load());
+            });
+            processor.setCurrentProgram(3);
+            writer.join();
+            expect(action && ! writerTimedOut.load() && writerReturned.load());
+            expect(sameCompleteState(processor, captured, stateY));
+            expect(sameCompleteState(processor, snapshot(processor), stateY) && liveStateMatches(processor, stateY),
+                   "The committed restore remains intact and all APVTS caches converge after the old notification returns");
+        }
+
+        beginTest("Frozen legacy fixtures keep missing-default, present-default and unknown-extension semantics");
+        {
+            ReverseLabAudioProcessor processor(root.getChildFile("legacy-state"));
+            restore(processor, stateY);
+            expectWithinAbsoluteError(processor.parameters.getRawParameterValue(rl::params::crossfade)->load(), 11.0f, 1.0e-6f,
+                                      "Fixture must start from a non-default value before testing missing-child recall");
+            // Fixed XML, not generated by the serializer under test. The archived
+            // original APVTS restores absent crossfade to DEFAULT4 (childAdded),
+            // defaults present-but-valueless mix to100, and uses last duplicate -7.
+            const auto xml = juce::parseXML(R"(<ReverseLabState program="1" future="v2">
+                <PARAM id="mix"/><PARAM id="output" value="-3"/>
+                <PARAM id="output" value="-7" extra="retained"/>
+                <Future payload="untouched"/>
+                </ReverseLabState>)");
+            juce::MemoryBlock legacy;
+            juce::AudioProcessor::copyXmlToBinary(*xml, legacy);
+            restore(processor, legacy);
+            const auto plain = [&](const char* id)
+            {
+                const auto* parameter = processor.parameters.getParameter(id);
+                return parameter->convertFrom0to1(parameter->getValue());
+            };
+            expectWithinAbsoluteError(plain(rl::params::crossfade), 4.0f, 1.0e-6f);
+            expectWithinAbsoluteError(plain(rl::params::mix), 100.0f, 1.0e-6f);
+            expectWithinAbsoluteError(plain(rl::params::output), -7.0f, 1.0e-6f);
+            expectEquals(processor.getCurrentProgram(), 1);
+            expect(processor.getLastEditorSize() == juce::Point<int>(900, 610));
+            const auto saved = stateTree(snapshot(processor));
+            expectEquals(saved["future"].toString(), juce::String("v2"));
+            expectEquals(saved.getChildWithName("Future")["payload"].toString(), juce::String("untouched"));
+            expectEquals(saved.getChild(2)["extra"].toString(), juce::String("retained"));
+            expectWithinAbsoluteError(static_cast<float>(saved.getChild(1)["value"]), -3.0f, 1.0e-6f);
+            processor.setCurrentProgram(3);
+            const auto factory = stateTree(snapshot(processor));
+            expectEquals(factory["future"].toString(), juce::String("v2"));
+            expect(saved.getChildWithName("Future").isEquivalentTo(factory.getChildWithName("Future")));
+            expectEquals(factory.getChild(2)["extra"].toString(), juce::String("retained"));
+            ReverseLabAudioProcessor recalled(root.getChildFile("legacy-recalled"));
+            restore(recalled, snapshot(processor));
+            for (const auto& [id, ignored] : factoryBank().front().values)
+            {
+                juce::ignoreUnused(ignored);
+                const auto* expected = processor.parameters.getParameter(id);
+                const auto* actual = recalled.parameters.getParameter(id);
+                expectWithinAbsoluteError(actual->getValue(), expected->getValue(), 1.0e-6f, id);
+            }
+        }
+
+        beginTest("Preparing at different sample rates preserves the complete non-default user state");
+        {
+            ReverseLabAudioProcessor processor(root.getChildFile("prepare-state"));
+            restore(processor, stateY);
+            setParameter(processor, rl::params::freeze, 1.0f);
+            const auto expected = snapshot(processor);
+            for (const auto rate : { 44100.0, 96000.0 })
+            {
+                processor.prepareToPlay(rate, 128);
+                expect(sameCompleteState(processor, snapshot(processor), expected) && liveStateMatches(processor, expected),
+                       "prepareToPlay may reset DSP history, but not the 19 values, selection, program or dimensions");
+                processor.releaseResources();
+            }
+        }
+
+        beginTest("Worker program requests remain deferred and state restores cancel only older requests");
+        {
+            ReverseLabAudioProcessor processor(root.getChildFile("deferred-programs"));
+            std::thread programWriter([&] { processor.setCurrentProgram(3); });
+            programWriter.join();
+            expectEquals(processor.getCurrentProgram(), 0, "Worker setters must not apply factory values before the message-thread service");
+            processor.servicePendingHostUpdatesForTesting();
+            expectEquals(processor.getCurrentProgram(), 3);
+            std::thread olderRequest([&] { processor.setCurrentProgram(1); });
+            olderRequest.join();
+            restore(processor, stateY);
+            processor.servicePendingHostUpdatesForTesting();
+            expect(sameCompleteState(processor, snapshot(processor), stateY) && liveStateMatches(processor, stateY),
+                   "A restore supersedes an older unapplied program request");
+            int requests = 0;
+            ParameterCallbackHost host(processor, [&](int)
+            {
+                if (requests++ == 0)
+                {
+                    processor.setCurrentProgram(processor.getCurrentProgram()); // callback echo
+                    processor.setCurrentProgram(3); // distinct request made after this restore started
+                }
+            });
+            std::thread restoreWriter([&] { restore(processor, stateZ); });
+            restoreWriter.join();
+            expectGreaterThan(requests, 0);
+            expect(sameCompleteState(processor, snapshot(processor), stateZ) && liveStateMatches(processor, stateZ),
+                   "A nested worker-thread program request remains deferred");
+            processor.servicePendingHostUpdatesForTesting();
+            expectEquals(processor.getCurrentProgram(), 3, "A new request from the restore's callback must survive to the next tick");
+        }
+    }
+};
+
+class ListenerLockRegressionTests final : public juce::UnitTest
+{
+    struct HeldListenerHost final : juce::AudioProcessorListener
+    {
+        HeldListenerHost(ReverseLabAudioProcessor& owner, const juce::MemoryBlock& expected)
+            : processor(owner), state(expected), a(std::this_thread::get_id()) { processor.addListener(this); }
+        ~HeldListenerHost() override { processor.removeListener(this); }
+
+        bool awaitSetup(juce::WaitableEvent& event)
+        {
+            if (event.wait(2000)) return true;
+            setupFailed.store(true);
+            // Release setup waits so a missed prerequisite is a test failure,
+            // not mistaken for the product deadlock guarded by CTest's timeout.
+            startB.signal(); bHoldingMix.signal(); allowRestore.signal();
+            return false;
+        }
+
+        void audioProcessorChanged(juce::AudioProcessor*, const ChangeDetails&) override {}
+        void audioProcessorParameterChanged(juce::AudioProcessor*, int index, float) override
+        {
+            const auto onA = std::this_thread::get_id() == a;
+            const auto bypass = processor.parameters.getParameter(rl::params::bypass)->getParameterIndex();
+            const auto crossfade = processor.parameters.getParameter(rl::params::crossfade)->getParameterIndex();
+            const auto mix = processor.parameters.getParameter(rl::params::mix)->getParameterIndex();
+            if (onA && index == bypass && ! aStarted.exchange(true))
+            {
+                startB.signal();
+                static_cast<void>(awaitSetup(bHoldingMix));
+            }
+            else if (onA && index == crossfade && ! restoreAllowed.exchange(true))
+            {
+                // B already owns JUCE's mix listener lock. A has left bypass;
+                // after this signal A never waits or joins inside a callback.
+                std::fprintf(stderr, "[listener-lock] A advanced to crossfade; B owns mix listener lock\n");
+                allowRestore.signal();
+            }
+            else if (! onA && index == mix && ! bStarted.exchange(true))
+            {
+                bHoldingMix.signal();
+                if (! awaitSetup(allowRestore) || setupFailed.load()) return;
+                std::fprintf(stderr, "[listener-lock] B calls restore while holding JUCE mix listener lock\n");
+                restore(processor, state);
+                immediateState = snapshot(processor);
+                immediateLive.store(liveStateMatches(processor, state, false) && ! processor.presets.isModified());
+                bReturned.store(true);
+                std::fprintf(stderr, "[listener-lock] B restore returned with authoritative state committed\n");
+            }
+            if (onA && index == mix) aReachedMix.store(true);
+        }
+
+        ReverseLabAudioProcessor& processor;
+        const juce::MemoryBlock& state;
+        const std::thread::id a;
+        juce::WaitableEvent startB, bHoldingMix, allowRestore;
+        juce::MemoryBlock immediateState; // written by B, read only after its join
+        std::atomic<bool> aStarted { false }, restoreAllowed { false }, bStarted { false }, bReturned { false },
+                          aReachedMix { false }, setupFailed { false }, immediateLive { false };
+    };
+
+public:
+    ListenerLockRegressionTests() : UnitTest("Foreign parameter-listener lock regression", "ListenerLock") {}
+
+    void runTest() override
+    {
+        beginTest("A program notification and B held mix-listener restore cannot form an ABBA deadlock");
+        const auto root = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                              .getChildFile("reverselab-listener-lock-" + juce::Uuid().toString());
+        ReverseLabAudioProcessor y(root.getChildFile("source-y"));
+        makeCustomState(y, 2, false);
+        auto expected = stateTree(snapshot(y));
+        // Match the original independent probe's B automation37 / restoredY53,
+        // while additionally exercising complete user-selection metadata.
+        expected.getChildWithProperty("id", rl::params::mix).setProperty("value", 53.0f, nullptr);
+        expected.getChildWithName("WkPresetSelection").getChildWithProperty("id", rl::params::mix)
+            .setProperty("value", 53.0f, nullptr);
+        juce::MemoryBlock stateY;
+        juce::AudioProcessor::copyXmlToBinary(*expected.createXml(), stateY);
+        ReverseLabAudioProcessor processor(root.getChildFile("target"));
+        HeldListenerHost host(processor, stateY);
+        std::thread b([&]
+        {
+            if (host.awaitSetup(host.startB)) setParameter(processor, rl::params::mix, 37.0f);
+        });
+        processor.setCurrentProgram(3);
+        b.join(); // outside every callback and after the entire program setter
+
+        expect(! host.setupFailed.load(), "Both real parameter callbacks must reach the prescribed lock-order setup");
+        expect(host.aStarted.load() && host.restoreAllowed.load() && host.bStarted.load()
+                   && host.bReturned.load() && host.aReachedMix.load(), "The actual held-listener overlap must execute and complete");
+        expect(host.immediateLive.load() && sameCompleteState(processor, host.immediateState, stateY),
+               "B's restore must synchronously publish all19 ranged values, program, dimensions and user metadata before its callback returns");
+        expect(sameCompleteState(processor, snapshot(processor), stateY) && liveStateMatches(processor, stateY),
+               "After the actual A notification replay, all19 APVTS caches must also agree with Y");
+        expect(! processor.hasPendingStateNotificationsForTesting());
+        logMessage("  held-listener restore returned; authoritative Y immediate; raw Y after replay; no pending notifications");
+    }
+};
+
 static ReverseEngineTests reverseEngineTests;
 static ProcessorTests processorTests;
 static AcceptanceRegressionTests acceptanceRegressionTests;
+static StateTransactionTests stateTransactionTests;
+static ListenerLockRegressionTests listenerLockRegressionTests;
 
-int main()
+int main(int argc, char** argv)
 {
     juce::ScopedJuceInitialiser_GUI juceInitialiser;
     juce::UnitTestRunner runner;
-    runner.runAllTests();
+    if (argc == 2 && juce::String(argv[1]) == "--state-transactions-only")
+        runner.runTestsInCategory("StateTransactions");
+    else if (argc == 2 && juce::String(argv[1]) == "--listener-lock-only")
+        runner.runTestsInCategory("ListenerLock");
+    else
+        runner.runAllTests();
     int failures = 0;
     for (int i = 0; i < runner.getNumResults(); ++i)
         if (auto* result = runner.getResult(i)) failures += result->failures;

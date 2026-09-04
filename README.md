@@ -58,6 +58,24 @@ Once Freeze has captured its initial window, changing length or tempo does not r
 
 Every main-branch push and pull request builds and strictly verifies the universal VST3 and its ZIP roundtrip on macOS, runs DSP/processor, parameter-text, preset and validator tests, and exercises the Makefiles path under ASan/UBSan. The extracted VST3 is instantiated and rendered with samplewise finite checks and parameter/audio state recall. Linux tests run under Xvfb for the real preset UI. See `.github/workflows/ci.yml`.
 
+The real VST3 host test requires canonical setter readbacks, a fresh instance whose defaults differ from the saved fixture, and non-silent effect output on both channels. Negative controls reject ignored parameter writes, passthrough, gain/delayed dry audio and dead channels. The separate state/audio roundtrip still compares all 19 parameters and every sample without fitting or alignment.
+
+Preset tests include 39 editor-lifecycle/host-callback cases plus six macOS-only native Import/Export panel cases. The former include two real Save-As-then-Load flows: normal success must load the requested next preset, while an intervening restore must keep its newer state. Set `WHYKIKI_PRESET_TEST_NATIVE_ONLY=1` on `ReverseLabPresetTests` for the focused native suite; it requires an active desktop and rejects a non-native fallback. The test-only Cocoa bridge observes its own process, verifies panel/delegate/modal teardown, unchanged fixture files/state and a usable reopened editor. Real Cubase/REAPER window behavior remains a separate acceptance gate.
+
+`WHYKIKI_PRESET_TEST_SAVE_RESTORE_ONLY=1` runs dirty-state guards and 14 deterministic persistence/control groups without opening an editor: real file-commit interleavings, same-ID/ABA restores, coherent capture, host-notification restores and bounded contention before writing. `WHYKIKI_PRESET_TEST_DIRTY_ONLY=1` runs just the dirty-state guards. Do not combine either focused mode with another. Their scheduling hooks exist only in the preset-test target, never in the VST3.
+
+`ReverseLabListenerLock` runs the genuine held-JUCE-listener-lock regression separately with a 20-second CTest timeout; the normal DSP binary also includes it. DSP, parameter-text and bundle tests have 300-second limits and the full preset test 600 seconds. A timeout fails the test.
+
+## Control-thread contract
+
+Program application and state restoration commit all parameter values, program identity, user-preset metadata and restored dimensions under a short control gate. The gate calls no JUCE parameter listeners, host callbacks or editor methods. State capture returns a complete committed state; even the first parameter callback observes the complete NEW state. A nested or independent state restore commits before returning, without waiting for another thread's notification dispatcher.
+
+Notifications run separately and never write an old captured value back to a parameter. If a newer state supersedes a notification, the dispatcher replays current values. Each drain sends at most 64 notifications; outstanding work resumes on later timer ticks instead of being discarded. A tick which also applies a pending program can run two drains. Actual ranged parameters are authoritative for DSP, persistence and dirty status; APVTS raw/UI caches may lag until their notifications complete.
+
+Program requests made off the message thread retain their deferred, coalesced next-service-tick behavior. Reentrant program requests also retain next-tick behavior, while redundant same-program notification echoes are ignored. `processBlock` makes one sequence-validated read of the committed parameter packet and never takes the control gate or waits for publication. This transaction guarantee does not make separate host-automation writes into a single atomic operation.
+
+The additional overlapping JUCE-control-thread tests do not change VST3's UI-thread state-access contract and do not replace actual Cubase/REAPER acceptance. Arbitrary cross-thread waits inside external JUCE listeners can still create their own lock cycles.
+
 ## Earlier release validation (1.0.4)
 
 - JUCE 8.0.15, VST3 SDK 3.8

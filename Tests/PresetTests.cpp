@@ -3,6 +3,11 @@
 #include <cstdio>
 #include <set>
 #include <stdexcept>
+#include <thread>
+#include <exception>
+#if JUCE_MAC
+#include "NativeFilePanel.h"
+#endif
 
 #if PRESET_TEST_SUBLAB
 using Processor = SubLab808Processor;
@@ -25,6 +30,54 @@ void set(Processor& p, const char* id, float value)
     auto* parameter = p.parameters.getParameter(id);
     require(parameter != nullptr, "parameter exists");
     parameter->setValueNotifyingHost(parameter->convertTo0to1(value));
+}
+// setValue() changes the authoritative ranged parameter without notifying APVTS.
+// Dirty status must be correct on both sides of that intentional cache lag.
+void checkAuthoritativeDirtyState(const juce::File& root)
+{
+    int failures = 0;
+    for (const bool userPreset : { false, true })
+    {
+        Processor processor(root.getChildFile(userPreset ? "User" : "Factory"));
+        processor.setCurrentProgram(0);
+        if (userPreset) ok(processor.presets.saveAs("Dirty cache contract", "Tests"));
+        require((processor.presets.current().factoryIndex < 0) == userPreset, "dirty fixture has the intended preset identity");
+        require(! processor.presets.isModified(), "dirty fixture starts clean");
+        auto* parameter = processor.parameters.getParameter("output");
+        const auto* raw = processor.parameters.getRawParameterValue("output");
+        require(parameter != nullptr && raw != nullptr, "dirty fixture has output parameter and raw cache");
+        const auto baselineNormalised = parameter->getValue();
+        const auto baseline = parameter->convertFrom0to1(baselineNormalised);
+        const auto cachedBaseline = raw->load();
+        const auto& range = parameter->getNormalisableRange();
+        const auto changed = baseline <= range.start ? range.end : range.start;
+
+        parameter->setValue(parameter->convertTo0to1(changed));
+        const auto authoritativeChanged = parameter->convertFrom0to1(parameter->getValue());
+        require(std::abs(authoritativeChanged - baseline) > 0.0f && std::abs(raw->load() - cachedBaseline) <= 0.0f,
+                "unnotified edit changes ranged value while raw cache stays at baseline");
+        const auto dirtyBeforeNotification = processor.presets.isModified();
+        if (! dirtyBeforeNotification) ++failures;
+
+        parameter->sendValueChangedMessageToListeners(parameter->getValue());
+        require(std::abs(raw->load() - authoritativeChanged) <= 0.0f && processor.presets.isModified(),
+                "real edit notification converges raw and ranged values and remains dirty");
+
+        parameter->setValue(baselineNormalised);
+        require(std::abs(parameter->convertFrom0to1(parameter->getValue()) - baseline) <= 0.0f
+                    && std::abs(raw->load() - authoritativeChanged) <= 0.0f,
+                "unnotified reset restores ranged baseline while raw cache stays edited");
+        const auto cleanBeforeNotification = ! processor.presets.isModified();
+        if (! cleanBeforeNotification) ++failures;
+
+        parameter->sendValueChangedMessageToListeners(parameter->getValue());
+        require(std::abs(raw->load() - baseline) <= 0.0f && ! processor.presets.isModified(),
+                "real reset notification converges raw and ranged values and remains clean");
+        std::printf("%s: %s dirty cache contract: unnotified edit dirty=%d; unnotified reset clean=%d; notified values converge.\n",
+                    dirtyBeforeNotification && cleanBeforeNotification ? "PASS" : "FAIL",
+                    userPreset ? "user" : "factory", dirtyBeforeNotification ? 1 : 0, cleanBeforeNotification ? 1 : 0);
+    }
+    require(failures == 0, "dirty status follows authoritative ranged values, not the APVTS notification cache");
 }
 std::map<juce::String, float> values(Processor& p)
 {
@@ -63,6 +116,8 @@ void sameLegalValues(Processor& p, const std::map<juce::String, float>& expected
         require(std::abs(legal(found->second) - legal(plain)) <= 0.0f, "all loaded parameters equal the exact legal saved values");
     }
 }
+#include "PresetSaveRestoreTests.inc"
+
 struct Tempo : juce::AudioPlayHead
 {
     double bpm = 120;
@@ -675,6 +730,8 @@ void checkReentrantLibraryAction(const juce::File& root, ReentrantAction action)
     std::printf("PASS: reentrancy %s: one mounted editor destroyed, confirmed operation committed, no stale follow-up/modal, replacement interactive.\n",
                 reentrantName(action));
 }
+#include "PresetSaveThenLoadTests.inc"
+
 void checkPresetReentrancy(const juce::File& root)
 {
     require(juce::MessageManager::getInstance()->isThisTheMessageThread(), "reentrancy tests run on message thread");
@@ -685,6 +742,7 @@ void checkPresetReentrancy(const juce::File& root)
                                ReentrantAction::saveThenLoad, ReentrantAction::userLoad })
         checkReentrantLibraryAction(root.getChildFile(reentrantName(action)), action);
     std::puts("PASS: 8 synchronous host-callback editor-destruction regressions.");
+    checkSaveThenLoadOrdering(root.getChildFile("SaveThenLoadOrdering"));
 }
 void checkPresetDialogLifecycles(const juce::File& root)
 {
@@ -704,6 +762,7 @@ void checkPresetDialogLifecycles(const juce::File& root)
         checkInstanceIsolation(root.getChildFile(juce::String("Isolation-") + actionName(action)), action);
     std::puts("PASS: 29 preset lifecycle regressions (21 owner transitions, 5 queued confirmations, 3 instance-isolation cases).");
 }
+#include "NativeFileChooserLifecycle.inc"
 }
 int main(int argc, char** argv)
 {
@@ -717,10 +776,34 @@ int main(int argc, char** argv)
     artifacts.createDirectory();
     try
     {
+        const auto dirtyOnly = juce::SystemStats::getEnvironmentVariable("WHYKIKI_PRESET_TEST_DIRTY_ONLY", {}) == "1";
+        const auto saveRestoreOnly = juce::SystemStats::getEnvironmentVariable("WHYKIKI_PRESET_TEST_SAVE_RESTORE_ONLY", {}) == "1";
+        require(! (dirtyOnly && saveRestoreOnly), "DIRTY_ONLY and SAVE_RESTORE_ONLY cannot be combined");
+        if (dirtyOnly || saveRestoreOnly)
+            for (const auto* mode : { "WHYKIKI_PRESET_TEST_NATIVE_ONLY", "WHYKIKI_PRESET_TEST_REENTRANCY_ONLY",
+                                      "WHYKIKI_PRESET_TEST_LIFECYCLE_ONLY" })
+                require(juce::SystemStats::getEnvironmentVariable(mode, {}) != "1",
+                        "DIRTY_ONLY or SAVE_RESTORE_ONLY cannot be combined with another focused test mode");
+        checkAuthoritativeDirtyState(root.getChildFile("AuthoritativeDirty"));
+        if (dirtyOnly) return 0;
+        checkPresetSaveRestore(root.getChildFile("SaveRestore"));
+        if (saveRestoreOnly) return 0;
+        if (juce::SystemStats::getEnvironmentVariable("WHYKIKI_PRESET_TEST_NATIVE_ONLY", {}) == "1")
+        {
+#if JUCE_MAC
+            checkNativeFileChooserLifecycles(root.getChildFile("NativeChoosers"));
+            return 0;
+#else
+            throw std::runtime_error("Native file-chooser tests require macOS; a non-native fallback is not accepted.");
+#endif
+        }
         checkPresetReentrancy(root.getChildFile("Reentrancy"));
         if (juce::SystemStats::getEnvironmentVariable("WHYKIKI_PRESET_TEST_REENTRANCY_ONLY", {}) == "1") return 0;
         checkPresetDialogLifecycles(root.getChildFile("Lifecycles"));
         if (juce::SystemStats::getEnvironmentVariable("WHYKIKI_PRESET_TEST_LIFECYCLE_ONLY", {}) == "1") return 0;
+#if JUCE_MAC
+        checkNativeFileChooserLifecycles(root.getChildFile("NativeChoosers"));
+#endif
         Processor p(root.getChildFile("Library"));
         require(p.getNumPrograms() == 64, "64 factory presets");
         require(p.presets.userPresets().empty(), "new library empty");

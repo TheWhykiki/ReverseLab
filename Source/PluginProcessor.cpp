@@ -10,6 +10,9 @@ ReverseLabAudioProcessor::ReverseLabAudioProcessor(juce::File presetStorage)
       parameters(*this, nullptr, "ReverseLabState", rl::params::createLayout()),
       presets(*this, parameters, "ReverseLab", factoryBank(), std::move(presetStorage))
 {
+    for (size_t i = 0; i < parameterCount; ++i)
+        rangedParameters[i] = parameters.getParameter(rl::params::ids[i]);
+    refreshRuntimeState();
     for (auto& channel : scope)
         for (auto& value : channel)
             value.store(0.0f);
@@ -30,6 +33,8 @@ bool ReverseLabAudioProcessor::isBusesLayoutSupported(const BusesLayout& layouts
 
 void ReverseLabAudioProcessor::prepareToPlay(double sampleRate, int)
 {
+    refreshRuntimeState();
+    appliedResetGeneration = runtimeState.reset;
     currentSampleRate = sampleRate;
     // Sixteen seconds covers every free-time value and two bars down to 30 BPM while
     // keeping multi-instance sessions practical at high sample rates.
@@ -60,20 +65,20 @@ void ReverseLabAudioProcessor::prepareToPlay(double sampleRate, int)
     smoothedLowpassEnabled.reset(sampleRate, 0.050);
     smoothedOffset.reset(sampleRate, 0.025);
     smoothedRandom.reset(sampleRate, 0.025);
-    smoothedMix.setCurrentAndTargetValue(parameters.getRawParameterValue(rl::params::mix)->load() * 0.01f);
-    smoothedOutput.setCurrentAndTargetValue(juce::Decibels::decibelsToGain(parameters.getRawParameterValue(rl::params::output)->load()));
-    smoothedBypass.setCurrentAndTargetValue(parameters.getRawParameterValue(rl::params::bypass)->load() > 0.5f ? 1.0f : 0.0f);
-    smoothedSpeed.setCurrentAndTargetValue(parameters.getRawParameterValue(rl::params::speed)->load());
-    smoothedCrossfade.setCurrentAndTargetValue(parameters.getRawParameterValue(rl::params::crossfade)->load() * 0.01f);
-    smoothedFeedback.setCurrentAndTargetValue(parameters.getRawParameterValue(rl::params::feedback)->load() * 0.01f);
-    smoothedHighpass.setCurrentAndTargetValue(parameters.getRawParameterValue(rl::params::highpass)->load());
-    smoothedLowpass.setCurrentAndTargetValue(parameters.getRawParameterValue(rl::params::lowpass)->load());
+    smoothedMix.setCurrentAndTargetValue(runtimeParameter(rl::params::Index::mix) * 0.01f);
+    smoothedOutput.setCurrentAndTargetValue(juce::Decibels::decibelsToGain(runtimeParameter(rl::params::Index::output)));
+    smoothedBypass.setCurrentAndTargetValue(runtimeParameter(rl::params::Index::bypass) > 0.5f ? 1.0f : 0.0f);
+    smoothedSpeed.setCurrentAndTargetValue(runtimeParameter(rl::params::Index::speed));
+    smoothedCrossfade.setCurrentAndTargetValue(runtimeParameter(rl::params::Index::crossfade) * 0.01f);
+    smoothedFeedback.setCurrentAndTargetValue(runtimeParameter(rl::params::Index::feedback) * 0.01f);
+    smoothedHighpass.setCurrentAndTargetValue(runtimeParameter(rl::params::Index::highpass));
+    smoothedLowpass.setCurrentAndTargetValue(runtimeParameter(rl::params::Index::lowpass));
     smoothedHighpassEnabled.setCurrentAndTargetValue(
-        parameters.getRawParameterValue(rl::params::highpass)->load() > 20.01f ? 1.0f : 0.0f);
+        runtimeParameter(rl::params::Index::highpass) > 20.01f ? 1.0f : 0.0f);
     smoothedLowpassEnabled.setCurrentAndTargetValue(
-        parameters.getRawParameterValue(rl::params::lowpass)->load() < 19999.0f ? 1.0f : 0.0f);
-    smoothedOffset.setCurrentAndTargetValue(parameters.getRawParameterValue(rl::params::stereoOffset)->load() * 0.01f);
-    smoothedRandom.setCurrentAndTargetValue(parameters.getRawParameterValue(rl::params::random)->load() * 0.01f);
+        runtimeParameter(rl::params::Index::lowpass) < 19999.0f ? 1.0f : 0.0f);
+    smoothedOffset.setCurrentAndTargetValue(runtimeParameter(rl::params::Index::stereoOffset) * 0.01f);
+    smoothedRandom.setCurrentAndTargetValue(runtimeParameter(rl::params::Index::random) * 0.01f);
     // Use the host tempo and meter when they are already known so the latency reported from
     // prepareToPlay() matches the first processed segment instead of a 120 BPM 4/4 assumption.
     double initialBpm = 120.0, initialBeatsPerBar = 4.0;
@@ -90,13 +95,13 @@ void ReverseLabAudioProcessor::prepareToPlay(double sampleRate, int)
     smoothedBpm = initialBpm;
     publishedBpm.store(initialBpm);
     publishedBeatsPerBar.store(initialBeatsPerBar);
-    const auto sync = parameters.getRawParameterValue(rl::params::sync)->load() > 0.5f;
-    const auto linked = parameters.getRawParameterValue(rl::params::link)->load() > 0.5f;
-    const auto left = calculateLengthSamples(static_cast<int>(parameters.getRawParameterValue(rl::params::leftSize)->load()),
-                                             parameters.getRawParameterValue(rl::params::leftFreeMs)->load(), initialBpm, initialBeatsPerBar, sync);
+    const auto sync = runtimeParameter(rl::params::Index::sync) > 0.5f;
+    const auto linked = runtimeParameter(rl::params::Index::link) > 0.5f;
+    const auto left = calculateLengthSamples(static_cast<int>(runtimeParameter(rl::params::Index::leftSize)),
+                                             runtimeParameter(rl::params::Index::leftFreeMs), initialBpm, initialBeatsPerBar, sync);
     const auto right = linked ? left : calculateLengthSamples(
-        static_cast<int>(parameters.getRawParameterValue(rl::params::rightSize)->load()),
-        parameters.getRawParameterValue(rl::params::rightFreeMs)->load(), initialBpm, initialBeatsPerBar, sync);
+        static_cast<int>(runtimeParameter(rl::params::Index::rightSize)),
+        runtimeParameter(rl::params::Index::rightFreeMs), initialBpm, initialBeatsPerBar, sync);
     activeProcessingLatency = juce::jmax(left, right);
     wetTaps = {};
     wetTaps[0].current = juce::jmax(0, activeProcessingLatency - left);
@@ -148,31 +153,31 @@ int ReverseLabAudioProcessor::calculateLengthSamples(int choice, float freeMs, d
 
 double ReverseLabAudioProcessor::getTailLengthSeconds() const
 {
-    const auto sync = parameters.getRawParameterValue(rl::params::sync)->load() > 0.5f;
-    const auto linked = parameters.getRawParameterValue(rl::params::link)->load() > 0.5f;
+    const auto sync = readParameter(rl::params::Index::sync) > 0.5f;
+    const auto linked = readParameter(rl::params::Index::link) > 0.5f;
     const auto left = calculateLengthSamples(
-        static_cast<int>(parameters.getRawParameterValue(rl::params::leftSize)->load()),
-        parameters.getRawParameterValue(rl::params::leftFreeMs)->load(), publishedBpm.load(),
+        static_cast<int>(readParameter(rl::params::Index::leftSize)),
+        readParameter(rl::params::Index::leftFreeMs), publishedBpm.load(),
         publishedBeatsPerBar.load(), sync);
     const auto right = linked ? left : calculateLengthSamples(
-        static_cast<int>(parameters.getRawParameterValue(rl::params::rightSize)->load()),
-        parameters.getRawParameterValue(rl::params::rightFreeMs)->load(), publishedBpm.load(),
+        static_cast<int>(readParameter(rl::params::Index::rightSize)),
+        readParameter(rl::params::Index::rightFreeMs), publishedBpm.load(),
         publishedBeatsPerBar.load(), sync);
     // Include an old, still-active segment while a length/latency change is in flight.
     const auto segmentSamples = juce::jmax(juce::jmax(left, right),
         juce::jmax(pendingLatency.load(), acknowledgedLatency.load()));
     const auto rate = juce::jmax(1.0, currentSampleRate);
     const auto segmentSeconds = static_cast<double>(segmentSamples) / rate;
-    if (parameters.getRawParameterValue(rl::params::freeze)->load() > 0.5f)
+    if (readParameter(rl::params::Index::freeze) > 0.5f)
         return 3600.0;
     const auto feedback = juce::jlimit(0.0, 0.95,
-        static_cast<double>(parameters.getRawParameterValue(rl::params::feedback)->load()) * 0.01);
+        static_cast<double>(readParameter(rl::params::Index::feedback)) * 0.01);
     const auto speed = juce::jlimit(0.25, 4.0,
-        static_cast<double>(parameters.getRawParameterValue(rl::params::speed)->load()));
+        static_cast<double>(readParameter(rl::params::Index::speed)));
     // Half of the 0.01%-parameter step ignores normalised zero's float roundoff; it cannot
     // produce even a one-sample offset anywhere in the supported 16-second history.
-    const auto shifted = std::abs(parameters.getRawParameterValue(rl::params::stereoOffset)->load()) >= 0.005f
-                         || parameters.getRawParameterValue(rl::params::random)->load() >= 0.005f;
+    const auto shifted = std::abs(readParameter(rl::params::Index::stereoOffset)) >= 0.005f
+                         || readParameter(rl::params::Index::random) >= 0.005f;
     const auto historySeconds = juce::jmax(segmentSeconds, static_cast<double>(maximumDelay + 8) / rate);
     // During reverse playback reader and writer separate at (speed+1). Offset/random can wrap
     // into any older ring frame; an exhausted reader can then hold that frame for a segment.
@@ -195,7 +200,13 @@ void ReverseLabAudioProcessor::timerCallback()
 {
     if (const auto requestedProgram = pendingProgramRequest.exchange(-1, std::memory_order_acq_rel);
         requestedProgram >= 0)
-        applyProgramChange(requestedProgram);
+    {
+        ControlOperation operation;
+        operation.program = requestedProgram;
+        submitControlOperation(std::move(operation));
+    }
+    drainStateNotifications();
+    applyRestoredEditorSize();
     const auto latency = pendingLatency.load();
     if (latency != getLatencySamples())
     {
@@ -248,8 +259,10 @@ void ReverseLabAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, ju
     if (channels == 0) return;
     if (dryDelay.getNumSamples() == 0) return; // processBlock() before prepareToPlay(): pass audio through
 
-    if (processingResetRequested.exchange(false, std::memory_order_acq_rel))
+    refreshRuntimeState();
+    if (runtimeState.reset != appliedResetGeneration)
     {
+        appliedResetGeneration = runtimeState.reset;
         engine.reset();
         invalidateDelayLines();
         filterState = {};
@@ -314,21 +327,21 @@ void ReverseLabAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, ju
     previousBlockPosition = playing ? blockPosition : std::nullopt;
     previousBlockSamples = buffer.getNumSamples();
 
-    const auto sync = parameters.getRawParameterValue(rl::params::sync)->load() > 0.5f;
-    const auto linked = parameters.getRawParameterValue(rl::params::link)->load() > 0.5f;
-    const auto leftChoice = static_cast<int>(parameters.getRawParameterValue(rl::params::leftSize)->load());
-    const auto rightChoice = linked ? leftChoice : static_cast<int>(parameters.getRawParameterValue(rl::params::rightSize)->load());
+    const auto sync = runtimeParameter(rl::params::Index::sync) > 0.5f;
+    const auto linked = runtimeParameter(rl::params::Index::link) > 0.5f;
+    const auto leftChoice = static_cast<int>(runtimeParameter(rl::params::Index::leftSize));
+    const auto rightChoice = linked ? leftChoice : static_cast<int>(runtimeParameter(rl::params::Index::rightSize));
     const auto leftLength = calculateLengthSamples(leftChoice,
-        parameters.getRawParameterValue(rl::params::leftFreeMs)->load(), smoothedBpm, beatsPerBar, sync);
+        runtimeParameter(rl::params::Index::leftFreeMs), smoothedBpm, beatsPerBar, sync);
     const auto rightLength = linked ? leftLength : calculateLengthSamples(rightChoice,
-        parameters.getRawParameterValue(rl::params::rightFreeMs)->load(), smoothedBpm, beatsPerBar, sync);
+        runtimeParameter(rl::params::Index::rightFreeMs), smoothedBpm, beatsPerBar, sync);
     const auto latency = activeProcessingLatency;
 
     rl::EngineSettings settings;
     settings.leftLength = leftLength;
     settings.rightLength = rightLength;
-    settings.freeze = parameters.getRawParameterValue(rl::params::freeze)->load() > 0.5f;
-    const auto retriggerParameter = parameters.getRawParameterValue(rl::params::retrigger)->load() > 0.5f;
+    settings.freeze = runtimeParameter(rl::params::Index::freeze) > 0.5f;
+    const auto retriggerParameter = runtimeParameter(rl::params::Index::retrigger) > 0.5f;
     if (retriggerParameter && !lastRetriggerParameter)
     {
         retriggerCountdown = 0;
@@ -342,27 +355,27 @@ void ReverseLabAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, ju
         retriggerResetRequested.store(true);
     }
     lastRetriggerParameter = retriggerParameter;
-    const auto requestedSeed = static_cast<uint32_t>(parameters.getRawParameterValue(rl::params::seed)->load());
+    const auto requestedSeed = static_cast<uint32_t>(runtimeParameter(rl::params::Index::seed));
     if (requestedSeed != appliedSeed)
     {
         appliedSeed = requestedSeed;
         engine.setSeed(appliedSeed);
     }
 
-    smoothedMix.setTargetValue(parameters.getRawParameterValue(rl::params::mix)->load() * 0.01f);
-    smoothedOutput.setTargetValue(juce::Decibels::decibelsToGain(parameters.getRawParameterValue(rl::params::output)->load()));
-    smoothedBypass.setTargetValue(parameters.getRawParameterValue(rl::params::bypass)->load() > 0.5f ? 1.0f : 0.0f);
-    smoothedSpeed.setTargetValue(parameters.getRawParameterValue(rl::params::speed)->load());
-    smoothedCrossfade.setTargetValue(parameters.getRawParameterValue(rl::params::crossfade)->load() * 0.01f);
-    smoothedFeedback.setTargetValue(parameters.getRawParameterValue(rl::params::feedback)->load() * 0.01f);
-    smoothedHighpass.setTargetValue(parameters.getRawParameterValue(rl::params::highpass)->load());
-    smoothedLowpass.setTargetValue(parameters.getRawParameterValue(rl::params::lowpass)->load());
+    smoothedMix.setTargetValue(runtimeParameter(rl::params::Index::mix) * 0.01f);
+    smoothedOutput.setTargetValue(juce::Decibels::decibelsToGain(runtimeParameter(rl::params::Index::output)));
+    smoothedBypass.setTargetValue(runtimeParameter(rl::params::Index::bypass) > 0.5f ? 1.0f : 0.0f);
+    smoothedSpeed.setTargetValue(runtimeParameter(rl::params::Index::speed));
+    smoothedCrossfade.setTargetValue(runtimeParameter(rl::params::Index::crossfade) * 0.01f);
+    smoothedFeedback.setTargetValue(runtimeParameter(rl::params::Index::feedback) * 0.01f);
+    smoothedHighpass.setTargetValue(runtimeParameter(rl::params::Index::highpass));
+    smoothedLowpass.setTargetValue(runtimeParameter(rl::params::Index::lowpass));
     smoothedHighpassEnabled.setTargetValue(
-        parameters.getRawParameterValue(rl::params::highpass)->load() > 20.01f ? 1.0f : 0.0f);
+        runtimeParameter(rl::params::Index::highpass) > 20.01f ? 1.0f : 0.0f);
     smoothedLowpassEnabled.setTargetValue(
-        parameters.getRawParameterValue(rl::params::lowpass)->load() < 19999.0f ? 1.0f : 0.0f);
-    smoothedOffset.setTargetValue(parameters.getRawParameterValue(rl::params::stereoOffset)->load() * 0.01f);
-    smoothedRandom.setTargetValue(parameters.getRawParameterValue(rl::params::random)->load() * 0.01f);
+        runtimeParameter(rl::params::Index::lowpass) < 19999.0f ? 1.0f : 0.0f);
+    smoothedOffset.setTargetValue(runtimeParameter(rl::params::Index::stereoOffset) * 0.01f);
+    smoothedRandom.setTargetValue(runtimeParameter(rl::params::Index::random) * 0.01f);
     const auto delayCapacity = dryDelay.getNumSamples();
 
     for (int sample = 0; sample < buffer.getNumSamples(); ++sample)
@@ -478,49 +491,209 @@ const juce::String ReverseLabAudioProcessor::getProgramName(int index)
     return juce::isPositiveAndBelow(index, getNumPrograms()) ? factoryBank()[static_cast<size_t>(index)].name : juce::String {};
 }
 
-void ReverseLabAudioProcessor::setPlainParameter(const char* id, float plainValue)
-{
-    if (auto* parameter = parameters.getParameter(id))
-        parameter->setValueNotifyingHost(parameter->convertTo0to1(plainValue));
-}
-
 void ReverseLabAudioProcessor::setCurrentProgram(int index)
 {
     const auto program = juce::jlimit(0, getNumPrograms() - 1, index);
-    auto* messageManager = juce::MessageManager::getInstanceWithoutCreating();
-    const auto onMessageThread = messageManager != nullptr && messageManager->isThisTheMessageThread();
-    if (onMessageThread && applyingProgramChange
-        && program == currentProgram.load(std::memory_order_acquire))
+    const auto reentrant = notificationOwner.load(std::memory_order_acquire) == juce::Thread::getCurrentThreadId();
+    if (reentrant && program == currentProgram.load(std::memory_order_acquire))
         return;
 
+    auto* messageManager = juce::MessageManager::getInstanceWithoutCreating();
+    const auto onMessageThread = messageManager != nullptr && messageManager->isThisTheMessageThread();
+    // Preserve the worker/audio-thread atomic path and next-tick program cascades.
     pendingProgramRequest.store(program, std::memory_order_release);
-    if (onMessageThread && ! applyingProgramChange)
-    {
-        const auto requestedProgram = pendingProgramRequest.exchange(-1, std::memory_order_acq_rel);
-        if (requestedProgram >= 0)
-            applyProgramChange(requestedProgram);
-    }
+    if (onMessageThread && ! reentrant)
+        if (const auto requested = pendingProgramRequest.exchange(-1, std::memory_order_acq_rel); requested >= 0)
+        {
+            ControlOperation operation;
+            operation.program = requested;
+            submitControlOperation(std::move(operation));
+        }
 }
 
-void ReverseLabAudioProcessor::applyProgramChange(int program)
+void ReverseLabAudioProcessor::submitControlOperation(ControlOperation operation)
 {
-    const juce::ScopedValueSetter<bool> applyingChange(applyingProgramChange, true);
-    const auto previousProgram = currentProgram.exchange(program, std::memory_order_acq_rel);
-    presets.clearSelection();
-    for (const auto& [id, value] : factoryBank()[static_cast<size_t>(program)].values)
-        setPlainParameter(id.toRawUTF8(), value);
-    if (program != previousProgram)
-        updateHostDisplay(ChangeDetails().withProgramChanged(true));
+    // Parse and normalise before acquiring the control gate. Both missing PARAM
+    // children and present children without "value" use the parameter default.
+    // Pinned APVTS creates a missing child, whose childAdded callback sets that
+    // default; the frozen legacy test also checks the actual original behavior.
+    std::array<std::optional<float>, parameterCount> updates;
+    const auto restoring = operation.kind == ControlOperation::Kind::state;
+    int width = 900, height = 610;
+    if (restoring)
+    {
+        for (size_t i = 0; i < parameterCount; ++i)
+            updates[i] = rangedParameters[i]->getDefaultValue();
+        operation.program = juce::jlimit(0, getNumPrograms() - 1,
+                                         static_cast<int>(operation.state.getProperty("program", 0)));
+        width = juce::jlimit(720, 1440, static_cast<int>(operation.state.getProperty("editorWidth", 900)));
+        height = juce::jlimit(460, 920, static_cast<int>(operation.state.getProperty("editorHeight", 610)));
+        for (const auto& child : operation.state)
+            for (size_t i = 0; i < parameterCount; ++i)
+                if (child["id"].toString() == rl::params::ids[i])
+                {
+                    const auto* parameter = rangedParameters[i];
+                    updates[i] = child.hasProperty("value")
+                        ? parameter->convertTo0to1(static_cast<float>(child["value"]))
+                        : parameter->getDefaultValue();
+                    break; // last duplicate child wins, as in APVTS
+                }
+    }
+    else
+    {
+        const auto& values = factoryBank()[static_cast<size_t>(operation.program)].values;
+        for (size_t i = 0; i < parameterCount; ++i)
+            if (const auto found = values.find(rl::params::ids[i]); found != values.end())
+                updates[i] = rangedParameters[i]->convertTo0to1(found->second);
+    }
+
+    {
+        const std::lock_guard lock(controlMutex);
+        parameterSequence.fetch_add(1, std::memory_order_seq_cst); // odd: DSP keeps its previous complete packet
+        const juce::ScopeGuard finishWrite { [this] { parameterSequence.fetch_add(1, std::memory_order_seq_cst); } };
+        const auto previousProgram = currentProgram.load(std::memory_order_relaxed);
+        // These are the standard AudioParameterFloat/Bool/Choice/Int setValue
+        // implementations, with no callbacks. Do not replace this with an APVTS
+        // operation or setValueNotifyingHost while the control gate is held.
+        for (size_t i = 0; i < parameterCount; ++i)
+            if (updates[i].has_value()) rangedParameters[i]->setValue(*updates[i]);
+        currentProgram.store(operation.program, std::memory_order_release);
+        if (restoring)
+        {
+            pendingProgramRequest.store(-1, std::memory_order_release);
+            stateExtensions = std::move(operation.state);
+            setRestoredEditorSize(width, height);
+            presets.restoreSelection(stateExtensions);
+            resetGeneration.fetch_add(1, std::memory_order_seq_cst);
+        }
+        else
+        {
+            presets.clearSelection();
+        }
+        committedProgramNotification = ! restoring && previousProgram != operation.program;
+        controlGeneration.fetch_add(1, std::memory_order_release);
+    }
+    // A nested or foreign setter returns with a fully committed state even if a
+    // listener on another thread is still inside an old notification.
+    drainStateNotifications();
+    applyRestoredEditorSize();
+}
+
+float ReverseLabAudioProcessor::readParameter(rl::params::Index index) const noexcept
+{
+    const auto* parameter = rangedParameters[static_cast<size_t>(index)];
+    return parameter->convertFrom0to1(parameter->getValue());
+}
+
+void ReverseLabAudioProcessor::refreshRuntimeState() noexcept
+{
+    // The pinned standard JUCE parameters use seq_cst atomic<float> value reads
+    // and writes. Put BOTH sequence checks and the reset marker in that same SC
+    // order: equal even checks enclose no control transaction (absent counter
+    // wraparound), so every enclosed payload load belongs to the same commit.
+    // This covers our gated transactions, not independent host automation writes.
+    const auto before = parameterSequence.load(std::memory_order_seq_cst);
+    if ((before & 1u) != 0) return;
+    RuntimeState next;
+    for (size_t i = 0; i < parameterCount; ++i)
+        next.values[i] = readParameter(static_cast<rl::params::Index>(i));
+    next.reset = resetGeneration.load(std::memory_order_seq_cst);
+    if (before == parameterSequence.load(std::memory_order_seq_cst))
+        runtimeState = next;
+}
+
+void ReverseLabAudioProcessor::drainStateNotifications()
+{
+    juce::Thread::ThreadID expected = nullptr;
+    if (! notificationOwner.compare_exchange_strong(expected, juce::Thread::getCurrentThreadId(),
+                                                    std::memory_order_acq_rel, std::memory_order_acquire))
+        return; // never wait while the caller might hold a JUCE listener lock
+    const juce::ScopeGuard finish { [this] { notificationOwner.store(nullptr, std::memory_order_release); } };
+    unsigned remaining = maxNotificationsPerDrain;
+    while (remaining > 0)
+    {
+        std::uint64_t generation = 0;
+        bool notifyProgram = false;
+        {
+            const std::lock_guard lock(controlMutex);
+            generation = controlGeneration.load(std::memory_order_acquire);
+            if (generation == notifiedGeneration.load(std::memory_order_acquire)) return;
+            notifyProgram = committedProgramNotification;
+        }
+        bool superseded = false;
+        for (auto* parameter : rangedParameters)
+        {
+            if (generation != controlGeneration.load(std::memory_order_acquire))
+            {
+                superseded = true;
+                break;
+            }
+            if (remaining == 0) return; // persistent generation mismatch is serviced by the next timer tick
+            --remaining;
+            // Only notify: never write an old captured value back into the live
+            // parameter. An already-running JUCE listener traversal may contain an
+            // old argument; generation change aborts the rest and replays CURRENT
+            // values so APVTS raw/UI caches converge after the drain.
+            parameter->sendValueChangedMessageToListeners(parameter->getValue());
+            if (generation != controlGeneration.load(std::memory_order_acquire))
+            {
+                superseded = true;
+                break;
+            }
+        }
+        if (superseded) continue;
+        if (notifyProgram)
+        {
+            if (remaining == 0) return;
+            --remaining;
+            updateHostDisplay(ChangeDetails().withProgramChanged(true));
+            if (generation != controlGeneration.load(std::memory_order_acquire)) continue;
+        }
+        notifiedGeneration.store(generation, std::memory_order_release);
+    }
 }
 
 void ReverseLabAudioProcessor::getStateInformation(juce::MemoryBlock& destination)
 {
-    auto state = parameters.copyState();
-    presets.appendSelection(state);
-    const auto savedSize = getLastEditorSize();
-    state.setProperty("program", currentProgram.load(std::memory_order_acquire), nullptr);
-    state.setProperty("editorWidth", savedSize.x, nullptr);
-    state.setProperty("editorHeight", savedSize.y, nullptr);
+    juce::ValueTree extensions, selection("ReverseLabState");
+    std::array<float, parameterCount> values;
+    int program = 0;
+    juce::Point<int> size;
+    {
+        const std::lock_guard lock(controlMutex);
+        extensions = stateExtensions; // immutable handle; deep copy/serialization happens outside the gate
+        for (size_t i = 0; i < parameterCount; ++i)
+            values[i] = readParameter(static_cast<rl::params::Index>(i));
+        program = currentProgram.load(std::memory_order_acquire);
+        size = getLastEditorSize();
+        presets.appendSelection(selection);
+    }
+    auto state = extensions.createCopy();
+    state.removeChild(state.getChildWithName("WkPresetSelection"), nullptr);
+    if (const auto selected = selection.getChildWithName("WkPresetSelection"); selected.isValid())
+        state.addChild(selected.createCopy(), -1, nullptr);
+    for (size_t i = 0; i < parameterCount; ++i)
+    {
+        juce::ValueTree parameter;
+        // APVTS binds the last duplicate ID; preserve earlier/unknown extension
+        // children and update that same active child in saved states.
+        for (int child = state.getNumChildren(); --child >= 0;)
+            if (state.getChild(child)["id"].toString() == rl::params::ids[i])
+            {
+                parameter = state.getChild(child);
+                break;
+            }
+        if (! parameter.isValid())
+        {
+            parameter = juce::ValueTree("PARAM");
+            parameter.setProperty("id", rl::params::ids[i], nullptr);
+            state.addChild(parameter, -1, nullptr);
+        }
+        parameter.setProperty("value", values[i], nullptr);
+    }
+    state.setProperty("program", program, nullptr);
+    state.setProperty("editorWidth", size.x, nullptr);
+    state.setProperty("editorHeight", size.y, nullptr);
     if (auto xml = state.createXml()) copyXmlToBinary(*xml, destination);
 }
 
@@ -529,30 +702,25 @@ void ReverseLabAudioProcessor::setStateInformation(const void* data, int size)
     if (auto xml = getXmlFromBinary(data, size))
     {
         auto state = juce::ValueTree::fromXml(*xml);
-        if (state.isValid() && state.hasType(parameters.state.getType()))
-        {
-            const auto restoredProgram = juce::jlimit(0, getNumPrograms() - 1,
-                                                      static_cast<int>(state.getProperty("program", 0)));
-            currentProgram.store(restoredProgram, std::memory_order_release);
-            pendingProgramRequest.store(-1, std::memory_order_release);
-            const auto restoredWidth = juce::jlimit(
-                720, 1440, static_cast<int>(state.getProperty("editorWidth", 900)));
-            const auto restoredHeight = juce::jlimit(
-                460, 920, static_cast<int>(state.getProperty("editorHeight", 610)));
-            setRestoredEditorSize(restoredWidth, restoredHeight);
-            parameters.replaceState(state);
-            presets.restoreSelection(state);
-            processingResetRequested.store(true, std::memory_order_release);
-            if (auto* messageManager = juce::MessageManager::getInstanceWithoutCreating();
-                messageManager != nullptr && messageManager->isThisTheMessageThread())
-                if (auto* editor = getActiveEditor())
-                {
-                    const auto restoredSize = getLastEditorSize();
-                    editor->setSize(restoredSize.x, restoredSize.y);
-                    acknowledgeRestoredEditorSize(restoredSize.x, restoredSize.y);
-                }
-        }
+        if (! state.hasType("ReverseLabState")) return;
+        ControlOperation operation;
+        operation.kind = ControlOperation::Kind::state;
+        operation.state = std::move(state);
+        submitControlOperation(std::move(operation));
     }
+}
+
+void ReverseLabAudioProcessor::applyRestoredEditorSize()
+{
+    if ((packedEditorSize.load(std::memory_order_acquire) & editorSizeRestorePendingMask) == 0) return;
+    if (auto* messageManager = juce::MessageManager::getInstanceWithoutCreating();
+        messageManager != nullptr && messageManager->isThisTheMessageThread())
+        if (auto* editor = getActiveEditor())
+        {
+            const auto size = getLastEditorSize();
+            editor->setSize(size.x, size.y);
+            acknowledgeRestoredEditorSize(size.x, size.y);
+        }
 }
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()

@@ -16,4 +16,6 @@ Failures inside the staged run retain a distinct `dist/failed-run-*` diagnostic 
 
 The VST3 host test uses legal parameter values obtained through the plugin's own formatter/parser. Hosts can cache unsnapped normalized requests; treating those cached requests as the saved value would produce a false state-recall failure. The test still compares all 19 saved parameters and every rendered sample after reload.
 
+Before recording the state, the test requires readbacks to match those canonical requests. A newly created default instance must differ from the saved fixture before restore. Both output channels must contain signal and effective wet processing: independent negative controls reject immediate passthrough, gain/delayed dry signals and either dead channel. The sine/cosine projection used only to detect dry output never fits, aligns or changes the separate before/after recall comparison or its tolerance.
+
 Local ad-hoc success is not public-distribution clearance. Developer-ID signing, actual notarization, installation on another Mac and subjective listening remain independent release gates. Creating a local candidate does not publish a GitHub Release or install anything.

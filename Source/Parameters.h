@@ -24,6 +24,20 @@ inline constexpr auto random = "random";
 inline constexpr auto seed = "seed";
 inline constexpr auto bypass = "bypass";
 
+// Stable control/DSP traversal order; independent of the host's parameter indices.
+// Preserve the existing factory-map notification order (bypass first).
+enum class Index : size_t
+{
+    bypass, crossfade, feedback, freeze, highpass, leftFreeMs, leftSize, link,
+    lowpass, mix, output, random, retrigger, rightFreeMs, rightSize, seed, speed,
+    stereoOffset, sync, count
+};
+inline constexpr std::array<const char*, static_cast<size_t>(Index::count)> ids {
+    bypass, crossfade, feedback, freeze, highpass, leftFreeMs, leftSize, link,
+    lowpass, mix, output, random, retrigger, rightFreeMs, rightSize, seed, speed,
+    stereoOffset, sync
+};
+
 inline juce::StringArray subdivisionNames()
 {
     return { "1/32", "1/16T", "1/16", "1/16D", "1/8T", "1/8", "1/8D",

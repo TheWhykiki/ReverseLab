@@ -3,6 +3,7 @@
 
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <cstdint>
+#include <mutex>
 #include "Parameters.h"
 #include "ReverseEngine.h"
 
@@ -76,6 +77,11 @@ public:
     }
 #if REVERSELAB_UNIT_TESTS
     void servicePendingHostUpdatesForTesting() { timerCallback(); }
+    [[nodiscard]] bool hasPendingStateNotificationsForTesting() const noexcept
+    {
+        return controlGeneration.load(std::memory_order_acquire)
+               != notifiedGeneration.load(std::memory_order_acquire);
+    }
     [[nodiscard]] size_t getAllocatedHistoryBytesForTesting() const noexcept
     {
         return engine.getAllocatedStorageBytes()
@@ -87,6 +93,14 @@ public:
 #endif
 
 private:
+    struct ControlOperation
+    {
+        enum class Kind { program, state };
+        Kind kind = Kind::program;
+        int program = 0;
+        juce::ValueTree state;
+    };
+
     struct OnePoleState { float low = 0.0f; float highLow = 0.0f; };
     // Per-channel wet alignment tap. The offset depends on the host-acknowledged latency *and* the
     // engine's active segment length, so it can change at a segment boundary before the host has
@@ -98,8 +112,15 @@ private:
     void queueLatencyUpdate(int samples) noexcept;
     void timerCallback() override;
     void invalidateDelayLines() noexcept;
-    void setPlainParameter(const char* id, float plainValue);
-    void applyProgramChange(int program);
+    void submitControlOperation(ControlOperation);
+    void drainStateNotifications();
+    void applyRestoredEditorSize();
+    float readParameter(rl::params::Index) const noexcept;
+    float runtimeParameter(rl::params::Index index) const noexcept
+    {
+        return runtimeState.values[static_cast<size_t>(index)];
+    }
+    void refreshRuntimeState() noexcept;
 
     static constexpr std::uint64_t editorSizeRestorePendingMask = std::uint64_t { 1 } << 63;
     static constexpr std::uint64_t packEditorSize(int width, int height) noexcept
@@ -121,9 +142,32 @@ private:
     std::atomic<double> publishedBpm { 120.0 };
     std::atomic<double> publishedBeatsPerBar { 4.0 };
     std::atomic<bool> retriggerResetRequested { false };
-    std::atomic<bool> processingResetRequested { false };
     std::atomic<int> currentProgram { 0 };
     std::atomic<int> pendingProgramRequest { -1 };
+    static constexpr size_t parameterCount = rl::params::ids.size();
+    std::array<juce::RangedAudioParameter*, parameterCount> rangedParameters {};
+    // The control gate never calls APVTS, listeners, the host, or an editor. A
+    // caller holding a JUCE parameter-listener lock can therefore commit without
+    // waiting for the notification dispatcher which may need that same lock.
+    std::mutex controlMutex;
+    juce::ValueTree stateExtensions { "ReverseLabState" }; // immutable between commits
+    bool committedProgramNotification = false; // protected by controlMutex
+    std::atomic<std::uint64_t> controlGeneration { 0 }, notifiedGeneration { 0 };
+    std::atomic<juce::Thread::ThreadID> notificationOwner { nullptr };
+    static constexpr unsigned maxNotificationsPerDrain = 64;
+    // Single-attempt seqlock read: processBlock never waits or takes a mutex.
+    // Actual ranged parameters are authoritative; APVTS raw values are UI caches.
+    static_assert(std::atomic<float>::is_always_lock_free
+                  && std::atomic<std::uint64_t>::is_always_lock_free,
+                  "The DSP control packet requires lock-free parameter and sequence atomics");
+    std::atomic<std::uint64_t> parameterSequence { 0 }, resetGeneration { 0 };
+    struct RuntimeState
+    {
+        std::array<float, parameterCount> values {};
+        std::uint64_t reset = 0;
+    };
+    RuntimeState runtimeState; // audio/lifecycle thread only
+    std::uint64_t appliedResetGeneration = 0;
     juce::SmoothedValue<float> smoothedMix, smoothedOutput, smoothedBypass, smoothedSpeed,
                                smoothedCrossfade, smoothedFeedback, smoothedHighpass,
                                smoothedLowpass, smoothedHighpassEnabled, smoothedLowpassEnabled,
@@ -142,7 +186,6 @@ private:
     std::optional<int64_t> previousBlockPosition;
     int previousBlockSamples = 0;
     bool lastRetriggerParameter = false;
-    bool applyingProgramChange = false;
     uint32_t appliedSeed = 0;
     std::atomic<std::uint64_t> packedEditorSize { (std::uint64_t { 900 } << 32) | std::uint64_t { 610 } };
 

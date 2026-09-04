@@ -37,6 +37,7 @@ Der Dateiname basiert auf der ID, nicht auf Benutzereingaben. Favoriten liegen s
 
 Dateien werden über eine temporäre Datei ersetzt. Gleichzeitige Schreibvorgänge werden gesperrt;
 ein veraltetes Preset in einer zweiten Instanz darf neu gespeicherte Klangänderungen nicht unbemerkt überschreiben.
+Klang und Preset-Metadaten werden aus derselben Auswahlgeneration erfasst. Wird während Save/Save As ein neuer DAW-Zustand geladen, bleibt die erfolgreich gespeicherte Datei erhalten, aber der neuere Klang behält seine eigene Preset-ID, seinen Namen und seine Vergleichsbasis. Auch ein Restore derselben ID oder ein Wechsel X→Y→X wird erkannt. Ein dadurch veralteter Save-As-then-Load-Folgeschritt entfällt; normales Speichern mit anschließendem Laden funktioniert weiter. Dauerhafte Zustandswechsel beim Erfassen ergeben nach begrenzten Versuchen eine verständliche Fehlermeldung vor jedem Dateischreiben.
 Import validiert Produkt, Version, Namen, Vollständigkeit, Zahlentyp und Parametergrenzen, bevor etwas gespeichert wird.
 Import legt eine neue ID an und löst Namenskonflikte mit einem Suffix.
 Laden, Speichern und Umbenennen prüfen zusätzlich, ob die Datei-ID zum Bibliothekseintrag passt.
@@ -62,6 +63,7 @@ Audio-Callbacks führen keine Preset-Dateizugriffe aus.
 6. Jedes Preset wird in drei Szenarien gerendert; Samples müssen endlich, hörbar und innerhalb der Test-Pegelgrenze sein.
 7. Die Oberfläche wird in minimaler, normaler und maximaler Größe gerendert und visuell geprüft.
 8. Editor-Lebensdauer, wartende Dialogantworten und Instanz-Isolation werden mit echten JUCE-Fenstern geprüft; synchrones Schließen durch einen Host-Listener wird separat getestet. Unveränderte Live-Werte und korrekt gespeicherte Werte werden jeweils gegen ihre eigene Darstellung geprüft, nicht durch pauschale Float-Toleranzen gleichgesetzt.
+9. Auf macOS werden Import und Export zusätzlich mit echten nativen Dateipanels bei Hide/Detach/Destroy geprüft: Panel geschlossen, Delegate gelöst, JUCE-Modal zerstört, Dateien und Zustand unverändert, erneut geöffneter Editor bedienbar. Ein nichtnativer Fallback ersetzt diesen Nachweis nicht. Host-spezifische Fensterbefehle in Cubase und REAPER bleiben eigene Abnahmeschritte.
 
 Automatische Audio-Tests prüfen technische Plausibilität und unterscheiden identische Ausgaben.
 Sie ersetzen keine musikalische Hörabnahme im Arrangement. Die Bank bleibt nach persönlichem Feedback nachjustierbar.

@@ -77,6 +77,10 @@ target_link_libraries(ReverseLabTests PRIVATE
 
 enable_testing()
 add_test(NAME ReverseLabDSP COMMAND ReverseLabTests)
+set_tests_properties(ReverseLabDSP PROPERTIES TIMEOUT 300)
+# Keep the real held-listener/control-order regression independently bounded.
+add_test(NAME ReverseLabListenerLock COMMAND ReverseLabTests --listener-lock-only)
+set_tests_properties(ReverseLabListenerLock PROPERTIES TIMEOUT 20)
 
 juce_add_console_app(ReverseLabParameterTextTests PRODUCT_NAME "ReverseLab Parameter Text Tests")
 target_sources(ReverseLabParameterTextTests PRIVATE Tests/ParameterTextTests.cpp)
@@ -85,6 +89,7 @@ target_compile_definitions(ReverseLabParameterTextTests PRIVATE JUCE_WEB_BROWSER
 target_link_libraries(ReverseLabParameterTextTests PRIVATE juce::juce_audio_processors
     PUBLIC juce::juce_recommended_config_flags juce::juce_recommended_warning_flags)
 add_test(NAME ReverseLabParameterTextRoundtrip COMMAND ReverseLabParameterTextTests)
+set_tests_properties(ReverseLabParameterTextRoundtrip PROPERTIES TIMEOUT 300)
 
 if(APPLE)
     juce_add_console_app(ReverseLabHostTests PRODUCT_NAME "ReverseLab VST3 Host Tests")
@@ -96,6 +101,7 @@ if(APPLE)
     add_dependencies(ReverseLabHostTests ReverseLab_VST3)
     add_test(NAME ReverseLabBundleLoad COMMAND ReverseLabHostTests
         "${CMAKE_BINARY_DIR}/ReverseLab_artefacts/$<CONFIG>/VST3/ReverseLab.vst3")
+    set_tests_properties(ReverseLabBundleLoad PROPERTIES TIMEOUT 300)
 endif()
 
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
@@ -135,3 +141,12 @@ target_compile_definitions(ReverseLabPresetTests PRIVATE
 target_link_libraries(ReverseLabPresetTests PRIVATE juce::juce_audio_utils juce::juce_dsp
     PUBLIC juce::juce_recommended_config_flags juce::juce_recommended_warning_flags)
 add_test(NAME ReverseLabPresets COMMAND ReverseLabPresetTests)
+set_tests_properties(ReverseLabPresets PROPERTIES TIMEOUT 600)
+
+if(APPLE)
+    # Test-only Cocoa observation proves that native file panels really open and
+    # close. Product code and non-macOS tests do not depend on this bridge.
+    # Keep JUCE's existing CXX toolchain for .mm files so CMAKE_CXX_FLAGS
+    # (including sanitizer instrumentation) still apply to every such source.
+    target_sources(ReverseLabPresetTests PRIVATE Tests/NativeFilePanel.mm)
+endif()

@@ -1,0 +1,17 @@
+# Release candidate contract
+
+Run `./scripts/package-release.sh Release` from a macOS checkout with initialized JUCE, CMake, Python 3 and the Xcode command-line tools. `REVERSELAB_BUILD_JOBS` defaults to 2. The full rebuild is intentional.
+
+1. Validate configuration, version and paired signing identities before packaging. An explicit version must match CMake.
+2. Snapshot tracked file bytes and new Source/Tests/scripts/Presets/Resources/Assets inputs, including the actual initialized submodule contents. Record commits, dirty status, modes and SHA-256 hashes. Reject a changing snapshot or source symlinks.
+3. Build the snapshot in a temporary directory under ignored `dist`. Build every target and require all registered tests to pass; keep JUnit and CTest logs.
+4. Check version, executable permissions, both arm64/x86_64 slices, macOS 11.0 deployment targets and strict signatures. Sign the staged candidate using the provided application identity, or explicitly ad hoc.
+5. Build the installer. If a notary profile is provided, require an Accepted response and validate stapled tickets. No external notarization is attempted without the supplied identities/profile.
+6. Extract the ZIP and installer payload independently, verify each binary hash/signature, and actually instantiate/render/restore each VST3 through the host test.
+7. Publish the completed artifact directory with an atomic same-filesystem rename under a publication lock. Never erase or replace earlier candidates. Write source/release manifests and checksums covering the artifacts and test reports.
+
+Pipeline unit tests inject build, test, signing, packaging, corruption, host-loading and publication failures. These are safety checks using fake tools, not evidence of actual Apple notarization. A real local candidate run is a separate check.
+
+The VST3 host test uses legal parameter values obtained through the plugin's own formatter/parser. Hosts can cache unsnapped normalized requests; treating those cached requests as the saved value would produce a false state-recall failure. The test still compares all 19 saved parameters and every rendered sample after reload.
+
+Local ad-hoc success is not public-distribution clearance. Developer-ID signing, actual notarization, installation on another Mac and subjective listening remain independent release gates. Creating a local candidate does not publish a GitHub Release or install anything.

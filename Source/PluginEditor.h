@@ -1,4 +1,5 @@
 #pragma once
+#include "PresetBar.h"
 
 #include <juce_gui_extra/juce_gui_extra.h>
 #include "PluginProcessor.h"
@@ -64,9 +65,9 @@ private:
     ReverseLabAudioProcessor& pluginProcessor;
     ReverseLabLookAndFeel lookAndFeel;
     ScopeComponent scope;
-    juce::Label title, subtitle, latencyLabel, leftSizeLabel, rightSizeLabel, presetLabel;
+    juce::Label title, subtitle, latencyLabel, leftSizeLabel, rightSizeLabel;
     juce::Slider leftSize, rightSize, leftFreeTime, rightFreeTime;
-    juce::ComboBox presetBox;
+    wk::PresetBar presetBar;
     juce::ToggleButton sync, link, freeze, retrigger, bypass;
     std::array<Knob, 10> knobs;
     std::unique_ptr<SliderAttachment> leftSizeAttachment, rightSizeAttachment;

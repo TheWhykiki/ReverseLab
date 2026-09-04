@@ -1,10 +1,12 @@
-# ReverseLab 1.0.4
+# ReverseLab 1.1.0 (development)
 
 ReverseLab is a tempo-synchronised stereo reverse effect for Cubase on macOS.
 
 Copyright © 2026 Whykiki Audio. ReverseLab is free software licensed under the GNU Affero General Public License v3.0; see [LICENSE](LICENSE). JUCE remains available under its own dual-licensing terms.
 
 ## Download and install
+
+The 1.1.0 source includes acceptance fixes that may not yet be in the latest downloadable release. In particular, earlier builds could sustain excessive feedback after input stopped when crossfade was enabled. Check the downloaded version; the earlier smoke-test results below do not certify this corrected source or every feedback setting.
 
 Download the current `.pkg` from [GitHub Releases](https://github.com/TheWhykiki/ReverseLab/releases/latest), open it, and follow the installer. It installs the universal VST3 into `/Library/Audio/Plug-Ins/VST3`. Restart Cubase or trigger a plug-in rescan afterwards.
 
@@ -16,7 +18,7 @@ The VST3 inside the current release is ad-hoc signed, but the `.pkg` itself is u
 git clone --recurse-submodules https://github.com/TheWhykiki/ReverseLab.git
 cd ReverseLab
 cmake -S . -B build -G Xcode -DCMAKE_BUILD_TYPE=Release
-cmake --build build --config Release --target ReverseLab_VST3 ReverseLabTests
+cmake --build build --config Release
 ctest --test-dir build -C Release --output-on-failure
 ```
 
@@ -26,7 +28,9 @@ The project builds a universal `arm64`/`x86_64` VST3. Install it only after test
 ./scripts/install-local.sh Release
 ```
 
-`./scripts/package-release.sh Release` creates the `.pkg`, VST3 ZIP, and checksums and refuses to package a stale bundle whose embedded version differs from `CMakeLists.txt`. For a Developer-ID-signed and notarized package, set `REVERSELAB_APPLICATION_IDENTITY`, `REVERSELAB_INSTALLER_IDENTITY`, and `REVERSELAB_NOTARY_PROFILE` to the corresponding signing identities and `notarytool` keychain profile before running it.
+`./scripts/package-release.sh Release` takes a source snapshot (including initialized JUCE and local source edits), builds it from scratch, runs every CTest suite, and loads both the extracted ZIP and installer payload as real VST3s. It does not trust an existing same-version build. A complete candidate is published atomically in a new `dist/ReverseLab-VERSION-COMMIT-SOURCEHASH-BINARYHASH/` directory; existing candidates are never overwritten. The directory includes source/release manifests, test reports and SHA-256 checksums. See [the release pipeline contract](docs/RELEASE_PIPELINE.md).
+
+For a Developer-ID-signed and notarized package, set `REVERSELAB_APPLICATION_IDENTITY`, `REVERSELAB_INSTALLER_IDENTITY`, and `REVERSELAB_NOTARY_PROFILE` to the corresponding signing identities and `notarytool` keychain profile before running it. Without these identities the candidate is ad-hoc signed, its installer is unsigned, and no notarization is claimed.
 
 The currently verified local installation uses the user-level VST3 directory, which Cubase scans without administrator privileges:
 
@@ -39,16 +43,20 @@ The currently verified local installation uses the user-level VST3 directory, wh
 - Reverse speed, crossfade, equal-power dry/wet, and output gain
 - Freeze, retrigger, stable feedback, high/low-pass filtering
 - Stereo offset and deterministic randomisation
-- Six factory programs and full Cubase automation/state restoration
+- 64 factory programs with a searchable user preset library and full Cubase automation/state restoration
 
 Changing segment length changes the reported plug-in latency. Cubase compensates other tracks, while ReverseLab delays its dry path internally to maintain alignment.
 ReverseLab keeps at most 16 seconds of history; `2 Bars` is therefore capped only below 30 BPM in 4/4 (or equivalent very long meters).
 
+Feedback uses a separate convex interpolation/crossfade path so its gain stays below unity; the audible cubic/equal-power path remains available. This prevents self-sustaining gain caused by feeding equal-power crossfades back repeatedly, but is not an output loudness limiter.
+
+Once Freeze has captured its initial window, changing length or tempo does not resume recording. Unfreeze explicitly resumes capture. The host-reported tail conservatively includes reverse read history, speed, feedback and output alignment. Extreme 16-second/95%-feedback settings can report about 97 minutes; use an explicit export range for intentionally held Freeze textures or when a shorter musical tail is desired.
+
 ## Continuous integration
 
-Every push and pull request builds and strictly verifies the universal VST3 and its ZIP roundtrip on macOS, runs the DSP/processor suite on macOS and Linux, and exercises the Makefiles path under ASan/UBSan. See `.github/workflows/ci.yml`.
+Every main-branch push and pull request builds and strictly verifies the universal VST3 and its ZIP roundtrip on macOS, runs DSP/processor, parameter-text, preset and validator tests, and exercises the Makefiles path under ASan/UBSan. The extracted VST3 is instantiated and rendered with samplewise finite checks and parameter/audio state recall. Linux tests run under Xvfb for the real preset UI. See `.github/workflows/ci.yml`.
 
-## Verified release
+## Earlier release validation (1.0.4)
 
 - JUCE 8.0.15, VST3 SDK 3.8
 - Universal `arm64` and `x86_64`
@@ -57,3 +65,16 @@ Every push and pull request builds and strictly verifies the universal VST3 and 
 - Cubase 15 `vstscanner` exit code 0
 - REAPER 7.79 native-arm64 host test: VST3 instantiated, 26 parameters exposed, project state saved, 4 s offline render completed at 44.1 kHz/24-bit stereo with no clipped samples
 - Automated DSP and processor tests pass at 44.1/48/88.2/96/192 kHz, variable block sizes, continuous free timing, latency-aligned bypass, validated state/editor restoration, coherent cross-thread editor sizing, precise long-running fractional read positions, host-visible program changes, resource release/re-prepare, independent stereo scope output, reset invalidation, 0.25×/1×/4× speed, feedback stability, Freeze/Unfreeze recovery and fresh-state pre-roll, click-free filter bypass automation, hostile transport metadata, superseded latency requests, and deterministic randomisation
+
+
+## Preset library (1.1.0)
+
+64 factory presets with product-specific categories, search and favourites. The original 6 host programs
+keep their names, indices and settings. Open the preset name to browse; use **Save** / **Save As** for your own
+sounds. **More** provides rename, delete, import and export. `*` marks unsaved changes.
+
+User presets are stored separately for ReverseLab, in the JUCE user application data directory under
+`Whykiki Audio/ReverseLab/Presets`, using `.reverselabpreset` files. Factory sounds remain protected.
+The DAW project also stores current unsaved edits and the user preset name, independently of the library files.
+
+See [the full preset catalogue](Presets/CATALOG.md) and [the implementation and acceptance plan](PRESET_PLAN.md).

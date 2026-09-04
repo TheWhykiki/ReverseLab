@@ -235,6 +235,108 @@ class AcceptanceEvidenceTests(unittest.TestCase):
                 for path, original in originals.items():
                     self.assertEqual(path.read_bytes(), original)
 
+    def test_corrupt_export_replaces_previous_pass_report(self):
+        for name in (report.REVERSE_BASE, report.REVERSE_RELOAD):
+            self.write_float_wave(seconds=1, path=self.cubase / name)
+        command = [sys.executable, "-B", report.__file__, str(self.cubase)]
+        previous = subprocess.run(command, capture_output=True, text=True)
+        self.assertEqual(previous.returncode, 0, previous.stderr)
+        previous_id = json.loads(previous.stdout).get("run_id")
+        after = self.cubase / report.REVERSE_RELOAD
+        after.write_bytes(after.read_bytes()[:-1])
+        current = subprocess.run(command, capture_output=True, text=True)
+        saved = json.loads((self.cubase / "audio-analysis.json").read_text())
+        self.assertFalse(saved["passed"])
+        self.assertEqual(current.returncode, 1)
+        cli = json.loads(current.stdout)
+        self.assertFalse(cli["passed"])
+        self.assertFalse(saved["analysis_completed"])
+        self.assertEqual(cli["run_id"], saved["run_id"])
+        self.assertNotEqual(saved["run_id"], previous_id)
+        self.assertTrue(saved["analysed_at_utc"].endswith("+00:00"))
+        self.assertIn(saved["run_id"], (self.cubase / "audio-analysis.md").read_text())
+        self.assertFalse(saved["recall_check"]["passed"])
+        self.assertIn("Overall checks: **FAIL**", (self.cubase / "audio-analysis.md").read_text())
+
+    def test_empty_evidence_directory_replaces_previous_pass_report(self):
+        path = self.write_float_wave(seconds=1, path=self.cubase / "standalone.wav")
+        command = [sys.executable, "-B", report.__file__, str(self.cubase)]
+        previous = subprocess.run(command, capture_output=True, text=True)
+        self.assertEqual(previous.returncode, 0, previous.stderr)
+        path.unlink()
+        current = subprocess.run(command, capture_output=True, text=True)
+        saved = json.loads((self.cubase / "audio-analysis.json").read_text())
+        self.assertFalse(saved["passed"])
+        self.assertEqual(current.returncode, 1)
+        self.assertFalse(json.loads(current.stdout)["passed"])
+
+    def test_unsupported_extra_wave_does_not_hide_valid_pair_or_input_error(self):
+        for name in (report.REVERSE_BASE, report.REVERSE_RELOAD):
+            self.write_float_wave(seconds=1, path=self.cubase / name)
+        unsupported = self.write_float_wave(seconds=1, path=self.cubase / "extra.wav")
+        data = bytearray(unsupported.read_bytes())
+        struct.pack_into("<H", data, 20, 6)  # Unsupported A-law encoding.
+        unsupported.write_bytes(data)
+        result = self.run_report()
+        self.assertEqual(len(result["renders"]), 2)
+        self.assertTrue(result["recall_check"]["passed"])
+        self.assertFalse(result["analysis_completed"])
+        self.assertFalse(result["passed"])
+        self.assertEqual(self.exit_code, 1)
+        self.assertEqual(result["input_errors"][0]["paths"], [str(unsupported.resolve())])
+        self.assertIn("Unsupported", result["input_errors"][0]["message"])
+        self.assertEqual(unsupported.read_bytes(), data)
+
+    def test_unreadable_required_wave_has_an_explicit_error(self):
+        for name in (report.REVERSE_BASE, report.REVERSE_RELOAD):
+            self.write_float_wave(seconds=1, path=self.cubase / name)
+        original_analyse = report.analyse
+
+        def deny_reload(path):
+            if path.name == report.REVERSE_RELOAD:
+                raise PermissionError("Access denied to reload export")
+            return original_analyse(path)
+
+        with patch.object(report, "analyse", side_effect=deny_reload):
+            result = self.run_report("--require-recall", "reverselab")
+        self.assertFalse(result["passed"])
+        self.assertFalse(result["analysis_completed"])
+        self.assertFalse(result["recall_check"]["passed"])
+        self.assertEqual(result["input_errors"][0]["error_type"], "PermissionError")
+        self.assertIsNone(result["same_host_comparisons"][0]["compatible"])
+        self.assertIn("Input errors", (self.cubase / "audio-analysis.md").read_text())
+
+    def test_file_read_failure_during_comparison_is_reported(self):
+        for name in (report.REVERSE_BASE, report.REVERSE_RELOAD):
+            self.write_float_wave(seconds=1, path=self.cubase / name)
+        with patch.object(report, "compare", side_effect=FileNotFoundError("Export removed during analysis")):
+            result = self.run_report()
+        self.assertTrue(result["signal_checks_passed"])
+        self.assertFalse(result["analysis_completed"])
+        self.assertFalse(result["passed"])
+        self.assertFalse(result["same_host_comparisons"][0]["passed"])
+        self.assertEqual(result["input_errors"][0]["stage"], "comparison")
+
+    def test_file_read_failure_during_tail_check_is_reported(self):
+        self.write_float_wave()
+        with patch.object(report, "check_tail", side_effect=OSError("Tail export became unavailable")):
+            result = self.run_report()
+        self.assertTrue(result["signal_checks_passed"])
+        self.assertFalse(result["analysis_completed"])
+        self.assertFalse(result["passed"])
+        self.assertFalse(result["tail_check"]["passed"])
+        self.assertEqual(result["input_errors"][0]["stage"], "tail")
+
+    def test_unreadable_host_summary_cannot_leave_a_passing_report(self):
+        self.write_float_wave(seconds=1, path=self.cubase / "standalone.wav")
+        self.assertTrue(self.run_report()["passed"])
+        (self.cubase / "stress-summary.txt").write_bytes(b"\xff\xfe")
+        result = self.run_report()
+        self.assertTrue(result["signal_checks_passed"])
+        self.assertFalse(result["analysis_completed"])
+        self.assertFalse(result["passed"])
+        self.assertEqual(result["input_errors"][0]["stage"], "host_summary")
+
     def test_misnamed_short_file_cannot_claim_full_tail(self):
         self.write_float_wave(seconds=1)
         result = self.run_report()
@@ -291,8 +393,13 @@ class AcceptanceEvidenceTests(unittest.TestCase):
         self.write_float_wave()
         data = self.tail_file.read_bytes()
         self.tail_file.write_bytes(data[:-1])
-        with self.assertRaises(ValueError):
-            self.run_report()
+        result = self.run_report()
+        self.assertFalse(result["passed"])
+        self.assertFalse(result["analysis_completed"])
+        self.assertFalse(result["tail_check"]["passed"])
+        self.assertEqual(self.exit_code, 1)
+        self.assertEqual(result["input_errors"][0]["paths"], [str(self.tail_file.resolve())])
+        self.assertIn("Truncated", result["input_errors"][0]["message"])
 
 
 if __name__ == "__main__":

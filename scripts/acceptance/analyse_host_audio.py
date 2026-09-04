@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Generate scoped audio evidence for Cubase or an independent stress run."""
 import argparse
+from datetime import datetime, timezone
 import json
 import math
 from pathlib import Path
+import struct
+import uuid
 from audio_fixture import analyse, compare, read_audio
 
 SUB_BASE = "01-SubLab808-Cubase.wav"
@@ -21,6 +24,12 @@ REQUIRED_RECALL_FILES = {
     "sublab808": (SUB_BASE, SUB_RELOAD),
     "reverselab": (REVERSE_BASE, REVERSE_RELOAD),
 }
+AUDIO_READ_ERRORS = (OSError, ValueError, struct.error)
+
+
+def input_error(stage, paths, error):
+    return {"stage": stage, "paths": [str(path) for path in paths],
+            "error_type": type(error).__name__, "message": str(error)}
 
 
 def recall_tolerance(value):
@@ -30,17 +39,29 @@ def recall_tolerance(value):
     return tolerance
 
 
-def check_comparisons(root, tolerance, required_plugins):
+def check_comparisons(root, tolerance, required_plugins, files, input_errors):
     """Gate every available pair and report recall coverage for each plugin separately."""
+    available = {path.name for path in files}
+    invalid = {Path(path).name for error in input_errors for path in error["paths"]}
     comparisons = []
     for plugin, purpose, before, after, seconds in COMPARISONS:
-        if not (root / before).is_file() or not (root / after).is_file():
+        if before not in available or after not in available:
             continue
-        comparison = (fixture_onset_comparison(root / before, root / after, seconds)
-                      if seconds is not None else compare(root / before, root / after))
+        comparison = {"first": str(root / before), "second": str(root / after), "compatible": None}
+        if before in invalid or after in invalid:
+            comparison.update(input_error=True, reason="Cannot compare invalid or unreadable WAV evidence; see input_errors")
+        else:
+            try:
+                comparison = (fixture_onset_comparison(root / before, root / after, seconds)
+                              if seconds is not None else compare(root / before, root / after))
+            except AUDIO_READ_ERRORS as error:
+                input_errors.append(input_error("comparison", (root / before, root / after), error))
+                comparison.update(input_error=True, reason="Could not read WAV evidence during comparison; see input_errors")
         comparison.update(plugin=plugin, purpose=purpose, required_seconds=seconds,
                           max_allowed_absolute_difference=tolerance)
-        if not comparison["compatible"]:
+        if comparison.get("input_error"):
+            reason = comparison["reason"]
+        elif not comparison["compatible"]:
             reason = ("Sample rates/channels must match; both files must cover the comparison interval"
                       if seconds is not None else "Sample rates, channels and full file frame counts must match")
         elif not comparison.get("samples_finite", False):
@@ -57,7 +78,7 @@ def check_comparisons(root, tolerance, required_plugins):
     plugins = {}
     for plugin, expected in REQUIRED_RECALL_FILES.items():
         recalls = [c for c in comparisons if c["plugin"] == plugin and c["purpose"] == "recall"]
-        missing = [name for name in expected if not (root / name).is_file()]
+        missing = [name for name in expected if name not in available]
         required = plugin in required_plugins
         if (required and missing) or any(not c["passed"] for c in recalls):
             status = "failed"
@@ -144,11 +165,22 @@ def main():
     root = args.directory.resolve()
     if not root.is_dir():
         parser.error("The audio directory does not exist")
-    files = sorted(root.glob("*.wav"))
-    if not files:
-        parser.error("No WAV evidence files found")
-    records = [analyse(p) for p in files]
-    result = {"directory": str(root), "renders": records,
+    errors = []
+    try:
+        files = sorted(root.glob("*.wav"))
+        if not files:
+            errors.append(input_error("discovery", (root,), ValueError("No WAV evidence files found")))
+    except OSError as error:
+        files = []
+        errors.append(input_error("discovery", (root,), error))
+    records = []
+    for path in files:
+        try:
+            records.append(analyse(path))
+        except AUDIO_READ_ERRORS as error:
+            errors.append(input_error("signal", (path,), error))
+    result = {"run_id": uuid.uuid4().hex, "analysed_at_utc": datetime.now(timezone.utc).isoformat(),
+              "directory": str(root), "renders": records, "input_errors": errors,
               "limits": ["No cross-host waveform equality is asserted: settings and sample rates differ.",
                          "Signal metrics are not subjective listening or user-interface acceptance.",
                          "Without --require-recall, missing pairs do not fail; consult each plugin's recall status.",
@@ -158,9 +190,14 @@ def main():
                         else [args.require_recall] if args.require_recall else [])
     result["recall_tolerance"] = args.recall_tolerance
     result["same_host_comparisons"], result["recall_check"] = check_comparisons(
-        root, args.recall_tolerance, required_plugins)
-    if (root / SUB_RELOAD).is_file():
-        result["tail_check"] = check_tail(root / SUB_RELOAD)
+        root, args.recall_tolerance, required_plugins, files, errors)
+    if (root / SUB_RELOAD) in files:
+        try:
+            result["tail_check"] = check_tail(root / SUB_RELOAD)
+        except AUDIO_READ_ERRORS as error:
+            errors.append(input_error("tail", (root / SUB_RELOAD,), error))
+            result["tail_check"] = {"path": str(root / SUB_RELOAD), "passed": False,
+                                    "input_error": True, "reason": "Could not read tail evidence; see input_errors"}
         if result["tail_check"]["passed"]:
             result["tail_resolution"] = (
                 "PASS: measured 36-second render with preceding signal; every sample in seconds 30–36 "
@@ -171,18 +208,26 @@ def main():
                 "is not established. See the measured tail_check conditions; filename is not evidence.")
     summary = root / "stress-summary.txt"
     if summary.exists():
-        result["host_summary"] = summary.read_text()
-    result["signal_checks_passed"] = all(r["basic_signal_ok"] for r in records)
+        try:
+            result["host_summary"] = summary.read_text()
+        except (OSError, UnicodeError) as error:
+            errors.append(input_error("host_summary", (summary,), error))
+    result["analysis_completed"] = not errors
+    result["signal_checks_passed"] = (bool(records) and len(records) == len(files)
+                                      and all(r["basic_signal_ok"] for r in records))
     result["comparison_checks_passed"] = (all(c["passed"] for c in result["same_host_comparisons"])
                                           if result["same_host_comparisons"] else None)
-    result["passed"] = (result["signal_checks_passed"] and result.get("tail_check", {}).get("passed", True)
+    result["passed"] = (result["analysis_completed"] and result["signal_checks_passed"]
+                        and result.get("tail_check", {}).get("passed", True)
                         and result["comparison_checks_passed"] is not False
                         and result["recall_check"]["passed"] is not False)
     destination = args.output_directory.resolve() if args.output_directory else root
     destination.mkdir(parents=True, exist_ok=True)
     (destination / "audio-analysis.json").write_text(json.dumps(result, indent=2, allow_nan=False) + "\n")
     lines = ["# Host audio evidence", "", f"Folder: `{root.name}`", "",
+             f"Run: `{result['run_id']}`. Analysed at (UTC): {result['analysed_at_utc']}.", "",
              f"Overall checks: **{'PASS' if result['passed'] else 'FAIL'}**. "
+             f"Analysis completed: {result['analysis_completed']}. "
              f"Signal checks: {'PASS' if result['signal_checks_passed'] else 'FAIL'}. "
              f"Recall: **{result['recall_check']['status'].upper()}**.", "",
              f"Maximum allowed absolute sample difference: {args.recall_tolerance}. "
@@ -192,6 +237,11 @@ def main():
                      f"recall comparisons checked={check['comparisons_checked']}.")
         if check["missing_required_files"]:
             lines.append("  Missing required files: " + ", ".join(f"`{name}`" for name in check["missing_required_files"]) + ".")
+    if errors:
+        lines += ["", "## Input errors", "", "This run could not evaluate all evidence. Its overall result is FAIL.", ""]
+        for error in errors:
+            paths = ", ".join(f"`{path}`" for path in error["paths"])
+            lines.append(f"- {error['stage']}: {paths}: {error['error_type']}: {error['message']}")
     lines += ["",
              "| File | Rate | Encoding | Seconds | Peak dBFS | RMS dBFS | Nonfinite | Full-scale | Last100ms RMS |",
              "|---|---:|---|---:|---:|---:|---:|---:|---:|"]
@@ -223,6 +273,8 @@ def main():
     lines += ["", "## Limits", ""] + [f"- {v}" for v in result["limits"]]
     (destination / "audio-analysis.md").write_text("\n".join(lines) + "\n")
     print(json.dumps({"json": str(destination / "audio-analysis.json"), "markdown": str(destination / "audio-analysis.md"),
+                      "run_id": result["run_id"], "analysed_at_utc": result["analysed_at_utc"],
+                      "analysis_completed": result["analysis_completed"], "input_errors": result["input_errors"],
                       "passed": result["passed"], "signal_checks_passed": result["signal_checks_passed"],
                       "comparison_checks_passed": result["comparison_checks_passed"],
                       "recall_tolerance": result["recall_tolerance"], "recall_check": result["recall_check"],

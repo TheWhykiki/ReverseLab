@@ -3,9 +3,19 @@
 Run `analyse_host_audio.py` against a directory of WAV exports. It writes
 `audio-analysis.json` and `audio-analysis.md`, prints a JSON summary, and exits
 with `0` when the evaluated checks pass or `1` when they fail. Invalid CLI
-arguments or a directory without WAV evidence produce a usage error (exit `2`).
-Malformed or unsupported WAV files raise an error and cannot produce a new
-passing report; consumers must check the process exit code, not an older report.
+arguments or a nonexistent input directory produce a usage error (exit `2`).
+An existing directory without WAV evidence, malformed/unsupported/unreadable
+WAVs, and errors reading a present host summary produce a current **FAIL**
+report and exit `1`. Readable WAVs are still analyzed; input errors cannot be
+silently omitted from the overall result.
+
+Each report includes a unique `run_id` and `analysed_at_utc` timestamp. The
+JSON report, Markdown report, and CLI summary share that identity. A later
+failed evidence run replaces an earlier passing report in the selected output
+directory. For an audit trail, choose a new `--output-directory` for each run.
+Always check the process exit code: invalid CLI arguments and output write
+failures cannot guarantee a fresh report. If a write fails partway through,
+report files can belong to different runs; check their `run_id` values.
 
 From the repository root:
 
@@ -63,8 +73,16 @@ with `passed: null`. Existing recognized pairs always affect the overall
 result, including when no recall flag was given. Unrecognized filenames are
 analyzed for signal quality only.
 
-JSON, the CLI summary, and Markdown expose the scope and outcome:
+The JSON report contains the detailed measurements. Its CLI summary and Markdown
+also expose the run identity, scope and outcome:
 
+- `analysis_completed`: false when evidence is missing from an empty directory,
+  cannot be read, or fails to decode. This is separate from the quality of audio
+  that could be measured. A measurable waveform mismatch completes analysis
+  but fails acceptance.
+- `input_errors`: each read/decoding failure with its stage, absolute paths,
+  error type and message. An unreadable comparison has `compatible: null`
+  because compatibility could not be measured; it still fails the comparison.
 - `signal_checks_passed`: all WAVs contain finite, non-silent audio without
   full-scale samples, using the existing signal criteria.
 - `comparison_checks_passed`: all available comparisons passed; `null` when
@@ -73,14 +91,20 @@ JSON, the CLI summary, and Markdown expose the scope and outcome:
 - `recall_check`: aggregate `passed`, `failed`, or `not_checked` status, plus
   coverage and missing required files for **each plugin**. An aggregate pass
   only covers the listed comparisons, not a plugin marked `not_checked`.
-- `passed`: signal and applicable tail checks passed, no available comparison
-  failed, and no required recall evidence is missing or failing.
+- `passed`: analysis completed, signal and applicable tail checks passed, no
+  available comparison failed, and no required recall evidence is missing or
+  failing. A passing comparison alongside an unreadable extra WAV does not
+  make the overall run pass.
 
 This is scoped waveform evidence for named exports. Record the source build,
 host, preset, export settings, and reload steps separately. The script cannot
 prove from filenames that a project was actually reopened, certify every
 preset, or replace DAW interaction and listening checks. Cross-host waveform
 equality is not asserted.
+
+Use the [DAW acceptance protocol](DAW_ACCEPTANCE.md) for the practical preset,
+save/reload, MIDI, Freeze, and listening checks. It includes separate coverage
+for each plugin and a record template; it is a procedure, not a completed test.
 
 Run the dependency-free regression suite from this directory:
 

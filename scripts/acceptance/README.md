@@ -9,6 +9,12 @@ WAVs, and errors reading a present host summary produce a current **FAIL**
 report and exit `1`. Readable WAVs are still analyzed; input errors cannot be
 silently omitted from the overall result.
 
+WAV decoding is bounded by the declared RIFF container. Child headers, payloads
+and required WORD padding must fit inside it, and both `fmt` and `data` chunks
+must be present there. Bytes after that container are ignored for decoding,
+not treated as additional audio chunks; the evidence hash still covers the
+entire captured file. Properly padded unknown chunks remain supported.
+
 Nonfinite **computed metrics** also fail the current run explicitly. Very large
 but finite Float64 samples can overflow RMS calculations even though the WAV
 can be decoded. Such a measurement is recorded as an evaluation error;

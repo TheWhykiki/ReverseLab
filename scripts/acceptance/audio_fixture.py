@@ -91,20 +91,31 @@ def read_audio(path, *, blob=None):
         blob = Path(path).read_bytes()
     if blob[:4] != b"RIFF" or blob[8:12] != b"WAVE":
         raise ValueError("Expected RIFF WAVE (not RF64/compressed audio)")
-    if struct.unpack_from("<I", blob, 4)[0] + 8 > len(blob):
+    riff_end = struct.unpack_from("<I", blob, 4)[0] + 8
+    if riff_end < 12:
+        raise ValueError("RIFF container does not contain its WAVE form type")
+    if riff_end > len(blob):
         raise ValueError("Truncated or still-being-written RIFF file")
     fmt = data = None
     at = 12
-    while at + 8 <= len(blob):
+    # Child headers, payloads and WORD padding must remain inside their parent.
+    # Physical bytes after this RIFF container are not additional audio chunks.
+    while at < riff_end:
+        if at + 8 > riff_end:
+            raise ValueError("Truncated RIFF chunk header inside its container")
         kind, size = struct.unpack_from("<4sI", blob, at)
-        if at + 8 + size > len(blob):
-            raise ValueError("Truncated or still-being-written RIFF chunk")
-        chunk = blob[at + 8:at + 8 + size]
+        payload_end = at + 8 + size
+        padded_end = payload_end + (size & 1)
+        if payload_end > riff_end:
+            raise ValueError("RIFF chunk payload exceeds its container")
+        if padded_end > riff_end:
+            raise ValueError("Missing RIFF chunk padding inside its container")
+        chunk = blob[at + 8:payload_end]
         if kind == b"fmt ":
             fmt = chunk
         elif kind == b"data":
             data = chunk
-        at += 8 + size + (size & 1)
+        at = padded_end
     if fmt is None or data is None:
         raise ValueError("Missing fmt/data chunk")
     if len(fmt) < 16:

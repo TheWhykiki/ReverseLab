@@ -260,6 +260,65 @@ class AcceptanceEvidenceTests(unittest.TestCase):
         self.assertFalse(saved["recall_check"]["passed"])
         self.assertIn("Overall checks: **FAIL**", (self.cubase / "audio-analysis.md").read_text())
 
+    def test_riff_container_boundaries_and_padding_in_real_cli(self):
+        seed = self.write_float_wave(seconds=1, path=self.root / "seed.wav").read_bytes()
+
+        def with_size(blob, size):
+            return blob[:4] + struct.pack("<I", size) + blob[8:]
+
+        def with_junk(padding):
+            body = seed[8:] + b"JUNK" + struct.pack("<I", 1) + b"x" + padding
+            return b"RIFF" + struct.pack("<I", len(body)) + body
+
+        # Preserve support for the existing WAVE_FORMAT_EXTENSIBLE float decoder.
+        float_guid = struct.pack("<IHH8B", 3, 0, 0x0010, 0x80, 0, 0, 0xaa, 0, 0x38, 0x9b, 0x71)
+        extended_fmt = struct.pack("<H", 65534) + seed[22:36] + struct.pack("<HHI", 22, 32, 3) + float_guid
+        extended_body = b"WAVEfmt " + struct.pack("<I", len(extended_fmt)) + extended_fmt + seed[36:]
+        extended = b"RIFF" + struct.pack("<I", len(extended_body)) + extended_body
+        padded = with_junk(b"\0")
+        cases = (
+            ("valid", seed, True),
+            ("valid_odd_chunk_padding", padded, True),
+            ("valid_extended_float", extended, True),
+            ("empty_riff_container", with_size(seed, 4), False),
+            ("data_exceeds_container", with_size(seed, len(seed) - 8 - 16), False),
+            ("missing_odd_chunk_padding", with_junk(b""), False),
+            ("padding_outside_container", with_size(padded, len(padded) - 9), False),
+            ("partial_child_header", with_size(seed + b"data", len(seed) - 4), False),
+            ("form_type_outside_container", with_size(seed, 0), False),
+            # Bytes after the RIFF container are not additional audio chunks.
+            ("outside_data_is_ignored", seed + b"data" + struct.pack("<I", 8) + b"\0" * 8, True),
+        )
+        for name, contents, expected_pass in cases:
+            with self.subTest(case=name):
+                root = self.cubase / name
+                root.mkdir()
+                before, after = root / report.REVERSE_BASE, root / report.REVERSE_RELOAD
+                before.write_bytes(seed)
+                after.write_bytes(seed)
+                command = [sys.executable, "-B", report.__file__, str(root), "--require-recall", "reverselab"]
+                previous = subprocess.run(command, capture_output=True, text=True)
+                self.assertEqual(previous.returncode, 0, previous.stderr)
+                previous_id = json.loads(previous.stdout)["run_id"]
+                after.write_bytes(contents)
+                current = subprocess.run(command, capture_output=True, text=True)
+                self.assertEqual(current.returncode, 0 if expected_pass else 1, current.stderr)
+                cli = json.loads(current.stdout)
+                saved = json.loads((root / "audio-analysis.json").read_text())
+                markdown = (root / "audio-analysis.md").read_text()
+                self.assertEqual(saved["passed"], expected_pass)
+                self.assertEqual(saved["analysis_completed"], expected_pass)
+                self.assertEqual(saved["recall_check"]["passed"], expected_pass)
+                self.assertEqual(cli["passed"], expected_pass)
+                self.assertEqual(cli["run_id"], saved["run_id"])
+                self.assertNotEqual(saved["run_id"], previous_id)
+                self.assertIn(saved["run_id"], markdown)
+                self.assertIn("Overall checks: **" + ("PASS" if expected_pass else "FAIL"), markdown)
+                if not expected_pass:
+                    self.assertEqual(saved["input_errors"][0]["stage"], "signal")
+                self.assertEqual(before.read_bytes(), seed)
+                self.assertEqual(after.read_bytes(), contents)
+
     def test_empty_evidence_directory_replaces_previous_pass_report(self):
         path = self.write_float_wave(seconds=1, path=self.cubase / "standalone.wav")
         command = [sys.executable, "-B", report.__file__, str(self.cubase)]

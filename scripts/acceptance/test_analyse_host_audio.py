@@ -4,6 +4,7 @@ import io
 import json
 from pathlib import Path
 import struct
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -21,8 +22,7 @@ class AcceptanceEvidenceTests(unittest.TestCase):
         self.cubase.mkdir()
         self.tail_file = self.cubase / "04-SubLab808-Cubase-after-reload-tail20s.wav"
 
-    def write_float_wave(self, seconds=36, overrides=None):
-        rate, channels = 100, 2
+    def write_float_wave(self, seconds=36, overrides=None, path=None, rate=100, channels=2):
         samples = [0.125 if frame < 20 else 0.0
                    for frame in range(round(seconds * rate)) for _ in range(channels)]
         for index, value in (overrides or {}).items():
@@ -30,14 +30,210 @@ class AcceptanceEvidenceTests(unittest.TestCase):
         data = struct.pack("<" + "f" * len(samples), *samples)
         fmt = struct.pack("<HHIIHH", 3, channels, rate, rate * channels * 4, channels * 4, 32)
         body = b"WAVEfmt " + struct.pack("<I", len(fmt)) + fmt + b"data" + struct.pack("<I", len(data)) + data
-        self.tail_file.write_bytes(b"RIFF" + struct.pack("<I", len(body)) + body)
+        path = path or self.tail_file
+        path.write_bytes(b"RIFF" + struct.pack("<I", len(body)) + body)
+        return path
 
-    def run_report(self):
-        with patch.object(sys, "argv", ["analyse_host_audio.py", str(self.cubase)]), \
-             patch.object(report, "__file__", str(self.root / "analyse_host_audio.py")), \
-             contextlib.redirect_stdout(io.StringIO()):
-            report.main()
+    def run_report(self, *options):
+        output = io.StringIO()
+        with patch.object(sys, "argv", ["analyse_host_audio.py", str(self.cubase), *options]), \
+             contextlib.redirect_stdout(output):
+            self.exit_code = report.main()
+        self.cli_result = json.loads(output.getvalue())
         return json.loads((self.cubase / "audio-analysis.json").read_text())
+
+    def test_changed_reload_audio_fails_overall_and_exit_status(self):
+        self.write_float_wave(seconds=1, path=self.cubase / "02-ReverseLab-Cubase.wav")
+        self.write_float_wave(seconds=1, overrides={10: -0.125},
+                              path=self.cubase / "05-ReverseLab-Cubase-after-reload.wav")
+        result = self.run_report()
+        self.assertTrue(result["signal_checks_passed"])
+        self.assertFalse(result["passed"])
+        self.assertEqual(self.exit_code, 1)
+
+    def test_shortened_reload_audio_fails_overall_and_exit_status(self):
+        self.write_float_wave(seconds=1, path=self.cubase / "02-ReverseLab-Cubase.wav")
+        self.write_float_wave(seconds=0.5, path=self.cubase / "05-ReverseLab-Cubase-after-reload.wav")
+        result = self.run_report()
+        self.assertTrue(result["signal_checks_passed"])
+        self.assertFalse(result["passed"])
+        self.assertEqual(self.exit_code, 1)
+
+    def test_exact_reverse_recall_passes_with_explicit_coverage(self):
+        for name in (report.REVERSE_BASE, report.REVERSE_RELOAD):
+            self.write_float_wave(seconds=1, path=self.cubase / name)
+        result = self.run_report("--require-recall", "reverselab")
+        self.assertTrue(result["passed"])
+        self.assertEqual(self.exit_code, 0)
+        self.assertEqual(result["recall_check"]["status"], "passed")
+        self.assertEqual(result["recall_check"]["plugins"]["sublab808"]["status"], "not_checked")
+        self.assertTrue(result["same_host_comparisons"][0]["sample_exact"])
+        self.assertEqual(self.cli_result["recall_check"], result["recall_check"])
+        self.assertIn("Recall: **PASSED**", (self.cubase / "audio-analysis.md").read_text())
+
+    def test_missing_pair_is_not_checked_by_default_but_fails_when_required(self):
+        self.write_float_wave(seconds=1, path=self.cubase / report.REVERSE_BASE)
+        result = self.run_report()
+        self.assertTrue(result["passed"])
+        self.assertEqual(self.exit_code, 0)
+        self.assertEqual(result["recall_check"]["status"], "not_checked")
+        self.assertIsNone(result["recall_check"]["passed"])
+        self.assertIsNone(result["comparison_checks_passed"])
+        self.assertIn("Recall: **NOT_CHECKED**", (self.cubase / "audio-analysis.md").read_text())
+        result = self.run_report("--require-recall", "reverselab")
+        self.assertFalse(result["passed"])
+        self.assertEqual(self.exit_code, 1)
+        check = result["recall_check"]["plugins"]["reverselab"]
+        self.assertEqual(check["status"], "failed")
+        self.assertEqual(check["missing_required_files"], [report.REVERSE_RELOAD])
+        self.assertIn("Missing required files", (self.cubase / "audio-analysis.md").read_text())
+
+    def test_requiring_both_plugins_cannot_pass_with_only_reverse_evidence(self):
+        for name in (report.REVERSE_BASE, report.REVERSE_RELOAD):
+            self.write_float_wave(seconds=1, path=self.cubase / name)
+        result = self.run_report("--require-recall", "both")
+        self.assertTrue(result["comparison_checks_passed"])
+        self.assertFalse(result["passed"])
+        self.assertEqual(self.exit_code, 1)
+        self.assertEqual(result["recall_check"]["status"], "failed")
+        self.assertEqual(result["recall_check"]["plugins"]["sublab808"]["missing_required_files"],
+                         [report.SUB_BASE, report.SUB_RELOAD])
+
+    def test_matching_both_plugins_passes_without_optional_tail2s_export(self):
+        for name, seconds in ((report.SUB_BASE, 16), (report.SUB_RELOAD, 36),
+                              (report.REVERSE_BASE, 1), (report.REVERSE_RELOAD, 1)):
+            self.write_float_wave(seconds=seconds, path=self.cubase / name)
+        result = self.run_report("--require-recall", "both")
+        self.assertTrue(result["passed"])
+        self.assertEqual(self.exit_code, 0)
+        self.assertTrue(all(p["passed"] for p in result["recall_check"]["plugins"].values()))
+
+    def test_sub_recall_uses_shared_prefix_and_checks_tail_separately(self):
+        self.write_float_wave(seconds=16, path=self.cubase / report.SUB_BASE)
+        self.write_float_wave(seconds=18, path=self.cubase / report.SUB_TAIL)
+        self.write_float_wave(seconds=36, overrides={4001: 0.125})
+        result = self.run_report("--require-recall", "sublab808")
+        self.assertTrue(result["passed"])
+        self.assertEqual([c["compared_seconds"] for c in result["same_host_comparisons"]], [16, 16, 18])
+        self.assertTrue(result["tail_check"]["passed"])
+
+    def test_sub_prefix_must_be_complete(self):
+        self.write_float_wave(seconds=15.99, path=self.cubase / report.SUB_BASE)
+        self.write_float_wave()
+        result = self.run_report("--require-recall", "sublab808")
+        self.assertTrue(result["tail_check"]["passed"])
+        self.assertFalse(result["same_host_comparisons"][0]["compatible"])
+        self.assertFalse(result["recall_check"]["passed"])
+        self.assertFalse(result["passed"])
+
+    def test_optional_extended_sub_comparison_failure_also_gates_overall(self):
+        self.write_float_wave(seconds=16, path=self.cubase / report.SUB_BASE)
+        self.write_float_wave(seconds=18, path=self.cubase / report.SUB_TAIL)
+        self.write_float_wave(overrides={3401: 0.125})  # Difference at 17 seconds, past the baseline.
+        result = self.run_report()
+        self.assertEqual([c["passed"] for c in result["same_host_comparisons"]], [True, True, False])
+        self.assertFalse(result["recall_check"]["passed"])
+        self.assertFalse(result["passed"])
+
+    def test_sub_optional_tail_reference_cannot_replace_required_baseline(self):
+        self.write_float_wave(seconds=18, path=self.cubase / report.SUB_TAIL)
+        self.write_float_wave()
+        self.assertTrue(self.run_report()["recall_check"]["passed"])
+        result = self.run_report("--require-recall", "sublab808")
+        self.assertFalse(result["passed"])
+        self.assertEqual(result["recall_check"]["plugins"]["sublab808"]["missing_required_files"],
+                         [report.SUB_BASE])
+
+    def test_note_on_diagnostic_cannot_hide_mismatch(self):
+        self.write_float_wave(seconds=16, path=self.cubase / report.SUB_BASE)
+        self.write_float_wave(overrides={102: 0.125})  # 0.51 seconds: inside a note-on window.
+        result = self.run_report()
+        comparison = result["same_host_comparisons"][0]
+        self.assertEqual(comparison["outside_first_20ms_of_fixture_note_onsets"]["max_absolute_difference"], 0)
+        self.assertFalse(comparison["passed"])
+        self.assertFalse(result["passed"])
+
+    def test_export_comparison_also_gates_overall_without_claiming_recall(self):
+        self.write_float_wave(seconds=16, path=self.cubase / report.SUB_BASE)
+        self.write_float_wave(seconds=18, overrides={80: 0.125}, path=self.cubase / report.SUB_TAIL)
+        result = self.run_report()
+        self.assertTrue(result["signal_checks_passed"])
+        self.assertFalse(result["passed"])
+        self.assertEqual(result["recall_check"]["status"], "not_checked")
+        self.assertEqual(result["same_host_comparisons"][0]["purpose"], "export_consistency")
+
+    def test_mismatched_rate_or_channels_fail_even_with_large_tolerance(self):
+        self.write_float_wave(seconds=1, path=self.cubase / report.REVERSE_BASE)
+        for rate, channels in ((200, 2), (100, 1)):
+            with self.subTest(rate=rate, channels=channels):
+                self.write_float_wave(seconds=1, rate=rate, channels=channels,
+                                      path=self.cubase / report.REVERSE_RELOAD)
+                result = self.run_report("--recall-tolerance", "1")
+                self.assertFalse(result["same_host_comparisons"][0]["compatible"])
+                self.assertFalse(result["passed"])
+                self.assertEqual(self.exit_code, 1)
+
+    def test_nonfinite_reload_cannot_pass_with_tolerance(self):
+        self.write_float_wave(seconds=1, path=self.cubase / report.REVERSE_BASE)
+        for value in (float("nan"), float("inf"), -float("inf")):
+            with self.subTest(value=value):
+                self.write_float_wave(seconds=1, overrides={1: value}, path=self.cubase / report.REVERSE_RELOAD)
+                result = self.run_report("--recall-tolerance", "1")
+                self.assertFalse(result["recall_check"]["passed"])
+                self.assertFalse(result["passed"])
+                self.assertEqual(self.exit_code, 1)
+
+    def test_tolerance_is_explicit_inclusive_and_keeps_sample_exact_false(self):
+        delta = 1 / 1024  # Exactly representable in the WAV and the CLI argument.
+        self.write_float_wave(seconds=1, path=self.cubase / report.REVERSE_BASE)
+        self.write_float_wave(seconds=1, overrides={10: 0.125 + delta}, path=self.cubase / report.REVERSE_RELOAD)
+        for tolerance, expected in ((0, False), (delta / 2, False), (delta, True), (delta * 2, True)):
+            with self.subTest(tolerance=tolerance):
+                result = self.run_report("--recall-tolerance", str(tolerance))
+                self.assertEqual(result["passed"], expected)
+                self.assertEqual(self.exit_code, 0 if expected else 1)
+                self.assertEqual(result["recall_tolerance"], tolerance)
+                comparison = result["same_host_comparisons"][0]
+                self.assertFalse(comparison["sample_exact"])
+                self.assertEqual(comparison["max_absolute_difference"], delta)
+
+    def test_invalid_tolerances_are_usage_errors(self):
+        self.write_float_wave(seconds=1, path=self.cubase / report.REVERSE_BASE)
+        for value in ("-0.1", "nan", "inf", "-inf", "1e309", "invalid"):
+            with self.subTest(value=value), contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as error:
+                    self.run_report("--recall-tolerance=" + value)
+                self.assertEqual(error.exception.code, 2)
+                self.assertFalse((self.cubase / "audio-analysis.json").exists())
+
+    def test_empty_pair_is_not_recall_evidence(self):
+        for name in (report.REVERSE_BASE, report.REVERSE_RELOAD):
+            self.write_float_wave(seconds=0, path=self.cubase / name)
+        result = self.run_report()
+        self.assertFalse(result["recall_check"]["passed"])
+        self.assertFalse(result["passed"])
+
+    def test_process_exit_and_separate_reports_preserve_original_evidence(self):
+        before = self.write_float_wave(seconds=1, path=self.cubase / report.REVERSE_BASE)
+        after = self.cubase / report.REVERSE_RELOAD
+        output = self.root / "reports"
+        for duration, overrides, expected_exit in ((1, None, 0), (1, {10: -0.125}, 1), (0.5, None, 1)):
+            with self.subTest(duration=duration, overrides=overrides):
+                self.write_float_wave(seconds=duration, overrides=overrides, path=after)
+                originals = {path: path.read_bytes() for path in (before, after)}
+                process = subprocess.run([sys.executable, "-B", report.__file__, str(self.cubase),
+                                          "--output-directory", str(output)], capture_output=True, text=True)
+                self.assertEqual(process.returncode, expected_exit, process.stderr)
+                cli = json.loads(process.stdout)
+                saved = json.loads((output / "audio-analysis.json").read_text())
+                self.assertEqual(cli["passed"], expected_exit == 0)
+                self.assertEqual(cli["recall_check"], saved["recall_check"])
+                self.assertEqual(saved["passed"], expected_exit == 0)
+                self.assertIn("Overall checks: **" + ("PASS" if expected_exit == 0 else "FAIL"),
+                              (output / "audio-analysis.md").read_text())
+                self.assertFalse((self.cubase / "audio-analysis.json").exists())
+                for path, original in originals.items():
+                    self.assertEqual(path.read_bytes(), original)
 
     def test_misnamed_short_file_cannot_claim_full_tail(self):
         self.write_float_wave(seconds=1)

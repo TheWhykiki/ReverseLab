@@ -101,6 +101,8 @@ endif()
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 add_test(NAME ReverseLabReleasePipeline COMMAND "${Python3_EXECUTABLE}" -B -m unittest discover
     -s "${CMAKE_CURRENT_SOURCE_DIR}/scripts/tests" -p "test_release_pipeline.py")
+add_test(NAME ReverseLabLocalInstaller COMMAND "${Python3_EXECUTABLE}" -B -m unittest discover
+    -s "${CMAKE_CURRENT_SOURCE_DIR}/scripts/tests" -p "test_install_local.py")
 add_test(NAME ReverseLabAcceptanceValidators COMMAND "${Python3_EXECUTABLE}" -B -m unittest -v test_analyse_host_audio)
 set_tests_properties(ReverseLabAcceptanceValidators PROPERTIES
     WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/scripts/acceptance")

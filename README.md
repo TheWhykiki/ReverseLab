@@ -28,6 +28,8 @@ The project builds a universal `arm64`/`x86_64` VST3. Install it only after test
 ./scripts/install-local.sh Release
 ```
 
+The local installer requires Python 3.9 or newer. It verifies the built bundle without re-signing or changing it, stages a fresh copy and verifies the installed bytes and signature. An existing installation is moved to a uniquely named backup; its exact path is printed on success. Failed installation attempts restore the previous bundle where possible and retain diagnostic staging/backup paths instead of deleting recovery data. It never merges new files into an old bundle. A pre-existing installer lock is reported for manual inspection, not removed automatically. Close plug-in hosts before replacing a loaded bundle.
+
 `./scripts/package-release.sh Release` takes a source snapshot (including initialized JUCE and local source edits), builds it from scratch, runs every CTest suite, and loads both the extracted ZIP and installer payload as real VST3s. It does not trust an existing same-version build. A complete candidate is published atomically in a new `dist/ReverseLab-VERSION-COMMIT-SOURCEHASH-BINARYHASH/` directory; existing candidates are never overwritten. The directory includes source/release manifests, test reports and SHA-256 checksums. See [the release pipeline contract](docs/RELEASE_PIPELINE.md).
 
 For a Developer-ID-signed and notarized package, set `REVERSELAB_APPLICATION_IDENTITY`, `REVERSELAB_INSTALLER_IDENTITY`, and `REVERSELAB_NOTARY_PROFILE` to the corresponding signing identities and `notarytool` keychain profile before running it. Without these identities the candidate is ad-hoc signed, its installer is unsigned, and no notarization is claimed.

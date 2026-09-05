@@ -7,39 +7,248 @@ on:
 
 jobs:
   macos:
-    name: macOS universal build + tests
-    runs-on: macos-14
+    name: macOS universal build + ${{ matrix.display }} tests
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - display: arm64 native
+            runner: macos-15
+            runner_arch: ARM64
+            native_arch: arm64
+            build_dir: build-macos-arm64
+            artifact_arch: arm64
+          - display: x86_64 native
+            runner: macos-15-intel
+            runner_arch: X64
+            native_arch: x86_64
+            build_dir: build-macos-x86_64
+            artifact_arch: x86_64
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           submodules: recursive
+      - name: Verify native runner architecture
+        run: |
+          test '${{ runner.arch }}' = '${{ matrix.runner_arch }}'
+          test "$(uname -m)" = '${{ matrix.native_arch }}'
+      - name: Verify factory bank
+        run: python3 scripts/generate-presets.py --check
       - name: Configure
-        run: cmake -S . -B build -G Xcode -DCMAKE_BUILD_TYPE=Release
+        run: cmake -S . -B ${{ matrix.build_dir }} -G Xcode -DCMAKE_BUILD_TYPE=Release
       - name: Build
-        run: cmake --build build --config Release --target ReverseLab_VST3 ReverseLabTests
+        run: cmake --build ${{ matrix.build_dir }} --config Release
       - name: Test
-        run: ctest --test-dir build -C Release --output-on-failure
+        run: ctest --test-dir ${{ matrix.build_dir }} -C Release --output-on-failure
       - name: Verify universal slices and deployment target
         run: |
-          bundle="build/ReverseLab_artefacts/Release/VST3/ReverseLab.vst3"
+          bundle="${{ matrix.build_dir }}/ReverseLab_artefacts/Release/VST3/ReverseLab.vst3"
           bin="$bundle/Contents/MacOS/ReverseLab"
-          lipo -archs "$bin" | tee /dev/stderr | grep -q "arm64"
-          lipo -archs "$bin" | grep -q "x86_64"
-          vtool -show-build "$bin" | grep -E "minos +11\.0"
+          architectures="$(lipo -archs "$bin" | tr ' ' '\n' | LC_ALL=C sort | xargs)"
+          test "$architectures" = "arm64 x86_64"
+          for arch in arm64 x86_64; do
+            vtool -arch "$arch" -show-build "$bin" | grep -E 'minos +11\.0$'
+          done
+          manifest="$bundle/Contents/Resources/moduleinfo.json"
+          test -s "$manifest"
+          grep -q '"Name": "ReverseLab"' "$manifest"
+          grep -q '"Classes"' "$manifest"
           codesign --verify --deep --strict "$bundle"
       - name: Package and validate downloadable bundle
         run: |
-          bundle="build/ReverseLab_artefacts/Release/VST3/ReverseLab.vst3"
-          ditto -c -k --sequesterRsrc --keepParent "$bundle" ReverseLab-VST3.zip
-          mkdir -p build/artifact-roundtrip
-          ditto -x -k ReverseLab-VST3.zip build/artifact-roundtrip
-          restored="build/artifact-roundtrip/ReverseLab.vst3"
+          bundle="${{ matrix.build_dir }}/ReverseLab_artefacts/Release/VST3/ReverseLab.vst3"
+          archive="ReverseLab-macOS-universal-${{ matrix.artifact_arch }}-VST3.zip"
+          ditto -c -k --sequesterRsrc --keepParent "$bundle" "$archive"
+          mkdir -p "${{ matrix.build_dir }}/artifact-roundtrip"
+          ditto -x -k "$archive" "${{ matrix.build_dir }}/artifact-roundtrip"
+          restored="${{ matrix.build_dir }}/artifact-roundtrip/ReverseLab.vst3"
           test -x "$restored/Contents/MacOS/ReverseLab"
+          test -s "$restored/Contents/Resources/moduleinfo.json"
+          test "$(shasum -a 256 "$bundle/Contents/MacOS/ReverseLab" | awk '{print $1}')" = "$(shasum -a 256 "$restored/Contents/MacOS/ReverseLab" | awk '{print $1}')"
+          test "$(shasum -a 256 "$bundle/Contents/Resources/moduleinfo.json" | awk '{print $1}')" = "$(shasum -a 256 "$restored/Contents/Resources/moduleinfo.json" | awk '{print $1}')"
           codesign --verify --deep --strict "$restored"
+          "${{ matrix.build_dir }}/ReverseLabHostTests_artefacts/Release/ReverseLabHostTests" "$restored"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: ReverseLab-VST3-${{ github.sha }}
-          path: ReverseLab-VST3.zip
+          name: ReverseLab-macOS-universal-${{ matrix.artifact_arch }}-${{ github.sha }}
+          path: ReverseLab-macOS-universal-${{ matrix.artifact_arch }}-VST3.zip
+          if-no-files-found: error
+
+  windows:
+    name: Windows ${{ matrix.display }} build + tests
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - display: x86_64
+            runner: windows-2022
+            runner_arch: X64
+            processor_arch: AMD64
+            generator: Visual Studio 17 2022
+            platform: x64
+            build_dir: build-windows-x86_64
+            bundle_arch: x86_64-win
+            dumpbin_host: Hostx64
+            dumpbin_target: x64
+            arm64x_image: "false"
+            artifact_arch: x64
+            installer_arch: x64
+          - display: Arm64EC (Windows on Arm)
+            runner: windows-11-vs2026-arm
+            runner_arch: ARM64
+            processor_arch: ARM64
+            generator: Visual Studio 18 2026
+            platform: ARM64EC
+            build_dir: build-windows-arm64ec
+            bundle_arch: arm64ec-win
+            dumpbin_host: Hostarm64
+            dumpbin_target: arm64
+            arm64x_image: "true"
+            artifact_arch: arm64ec
+            installer_arch: arm64ec
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          submodules: recursive
+      - name: Verify native runner architecture
+        shell: pwsh
+        run: |
+          if ('${{ runner.arch }}' -ne '${{ matrix.runner_arch }}') {
+            throw "Expected a ${{ matrix.runner_arch }} runner, got ${{ runner.arch }}"
+          }
+          if ($env:PROCESSOR_ARCHITECTURE -ne '${{ matrix.processor_arch }}') {
+            throw "Expected native process architecture ${{ matrix.processor_arch }}, got $env:PROCESSOR_ARCHITECTURE"
+          }
+      - name: Verify factory bank
+        run: python scripts/generate-presets.py --check
+      - name: Configure
+        run: >
+          cmake -S . -B ${{ matrix.build_dir }} -G "${{ matrix.generator }}"
+          -A ${{ matrix.platform }}
+      - name: Build
+        run: cmake --build ${{ matrix.build_dir }} --config Release --parallel 2
+      - name: Compile Windows updater safety and production shapes
+        run: >
+          cmake --build ${{ matrix.build_dir }} --config Release --parallel 2 --target
+          ReverseLabWindowsUpdaterPolicyTests ReverseLabWindowsUpdaterSelfTests
+          ReverseLabWindowsUpdaterProductionShape ReverseLabWindowsUpdaterLauncherShape
+      - name: Verify Windows VST3 bundle architecture and manifest
+        shell: pwsh
+        run: |
+          $bundle = (Resolve-Path -LiteralPath '${{ matrix.build_dir }}/ReverseLab_artefacts/Release/VST3/ReverseLab.vst3').Path
+          $contents = Join-Path $bundle 'Contents'
+          $architectureDirectories = @(Get-ChildItem -LiteralPath $contents -Directory |
+            Where-Object Name -Like '*-win' | ForEach-Object Name)
+          if ($architectureDirectories.Count -ne 1 -or
+              $architectureDirectories[0] -ne '${{ matrix.bundle_arch }}') {
+            throw "Unexpected VST3 architecture directories: $($architectureDirectories -join ', ')"
+          }
+          $binary = Join-Path $bundle 'Contents/${{ matrix.bundle_arch }}/ReverseLab.vst3'
+          $manifest = Join-Path $bundle 'Contents/Resources/moduleinfo.json'
+          if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) {
+            throw "Missing expected VST3 binary: $binary"
+          }
+          if (-not (Test-Path -LiteralPath $manifest -PathType Leaf) -or
+              (Get-Item -LiteralPath $manifest).Length -eq 0) {
+            throw "Missing or empty JUCE-generated VST3 moduleinfo: $manifest"
+          }
+          $manifestText = Get-Content -LiteralPath $manifest -Raw
+          if ($manifestText -notmatch '"Name"\s*:\s*"ReverseLab"' -or
+              $manifestText -notmatch '"Classes"\s*:') {
+            throw "Unexpected VST3 moduleinfo content: $manifest"
+          }
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+          $installation = (& $vswhere -latest -products * -property installationPath).Trim()
+          if (-not $installation) { throw "Cannot locate Visual Studio" }
+          $toolset = Get-ChildItem -LiteralPath "$installation/VC/Tools/MSVC" -Directory |
+            Sort-Object { [version] $_.Name } -Descending | Select-Object -First 1
+          $dumpbin = Join-Path $toolset.FullName 'bin/${{ matrix.dumpbin_host }}/${{ matrix.dumpbin_target }}/dumpbin.exe'
+          if (-not (Test-Path -LiteralPath $dumpbin -PathType Leaf)) {
+            throw "Missing native dumpbin for this runner: $dumpbin"
+          }
+          $headers = (& $dumpbin /headers $binary 2>&1 | Out-String)
+          if ($LASTEXITCODE -ne 0) { throw "dumpbin failed with exit code $LASTEXITCODE" }
+          if ($headers -notmatch '(?im)^\s*8664 machine \(x64\)') {
+            throw "VST3 is not a final x64/ARM64EC PE image"
+          }
+          $isArm64X = $headers -match '(?i)ARM64X'
+          if ($isArm64X -ne [System.Convert]::ToBoolean('${{ matrix.arm64x_image }}')) {
+            throw "Unexpected ARM64X marker state in final PE headers: $isArm64X"
+          }
+          Write-Host "Verified $binary (ARM64X=$isArm64X)"
+      - name: Test non-dialog suites
+        run: >
+          ctest --test-dir ${{ matrix.build_dir }} -C Release --output-on-failure
+          --no-tests=error -E "^ReverseLabPresets$"
+      - name: Test headless preset persistence
+        env:
+          WHYKIKI_PRESET_TEST_SAVE_RESTORE_ONLY: "1"
+        run: >
+          ctest --test-dir ${{ matrix.build_dir }} -C Release --output-on-failure
+          --no-tests=error -R "^ReverseLabPresets$"
+      - name: Package roundtrip and load the extracted VST3
+        shell: pwsh
+        run: |
+          $build = '${{ matrix.build_dir }}'
+          $bundle = (Resolve-Path -LiteralPath "$build/ReverseLab_artefacts/Release/VST3/ReverseLab.vst3").Path
+          $archive = 'ReverseLab-Windows-${{ matrix.artifact_arch }}-VST3-UNSIGNED-NOT-FOR-DISTRIBUTION.zip'
+          $roundtrip = Join-Path $build 'artifact-roundtrip'
+          Compress-Archive -LiteralPath $bundle -DestinationPath $archive
+          Expand-Archive -LiteralPath $archive -DestinationPath $roundtrip
+          $restored = Join-Path $roundtrip 'ReverseLab.vst3'
+          $builtBinary = Join-Path $bundle 'Contents/${{ matrix.bundle_arch }}/ReverseLab.vst3'
+          $restoredBinary = Join-Path $restored 'Contents/${{ matrix.bundle_arch }}/ReverseLab.vst3'
+          $builtManifest = Join-Path $bundle 'Contents/Resources/moduleinfo.json'
+          $restoredManifest = Join-Path $restored 'Contents/Resources/moduleinfo.json'
+          if (-not (Test-Path -LiteralPath $restoredBinary -PathType Leaf)) {
+            throw "Archive did not preserve the VST3 bundle layout"
+          }
+          if (-not (Test-Path -LiteralPath $restoredManifest -PathType Leaf) -or
+              (Get-Item -LiteralPath $restoredManifest).Length -eq 0) {
+            throw "Archive did not preserve the VST3 moduleinfo"
+          }
+          $builtHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $builtBinary).Hash
+          $restoredHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $restoredBinary).Hash
+          if ($builtHash -ne $restoredHash) {
+            throw "Archive roundtrip changed the VST3 binary"
+          }
+          $builtManifestHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $builtManifest).Hash
+          $restoredManifestHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $restoredManifest).Hash
+          if ($builtManifestHash -ne $restoredManifestHash) {
+            throw "Archive roundtrip changed the VST3 moduleinfo"
+          }
+          & "$build/ReverseLabHostTests_artefacts/Release/ReverseLabHostTests.exe" $restored
+          if ($LASTEXITCODE -ne 0) { throw "Extracted VST3 host test failed with exit code $LASTEXITCODE" }
+      - name: Build and validate unsigned Windows MSI candidate
+        shell: pwsh
+        run: |
+          $build = '${{ matrix.build_dir }}'
+          $versionEntry = @(Get-Content -LiteralPath "$build/CMakeCache.txt" |
+            Where-Object { $_ -like 'CMAKE_PROJECT_VERSION:STATIC=*' })
+          if ($versionEntry.Count -ne 1) { throw 'Cannot resolve the exact CMake project version' }
+          $version = ($versionEntry[0] -split '=', 2)[1]
+          $bundle = (Resolve-Path -LiteralPath "$build/ReverseLab_artefacts/Release/VST3/ReverseLab.vst3").Path
+          $hostTestBinary = (Resolve-Path -LiteralPath "$build/ReverseLabHostTests_artefacts/Release/ReverseLabHostTests.exe").Path
+          pwsh -NoProfile -File scripts/build-windows-installer.ps1 `
+            -Architecture '${{ matrix.installer_arch }}' `
+            -BundlePath $bundle `
+            -Version $version `
+            -OutputDirectory "$build/windows-installer" `
+            -HostTestPath $hostTestBinary `
+            -AllowUnsigned
+          if ($LASTEXITCODE -ne 0) { throw 'Windows MSI validation failed' }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ReverseLab-Windows-${{ matrix.artifact_arch }}-VST3-UNSIGNED-NOT-FOR-DISTRIBUTION
+          path: ReverseLab-Windows-${{ matrix.artifact_arch }}-VST3-UNSIGNED-NOT-FOR-DISTRIBUTION.zip
+          if-no-files-found: error
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ReverseLab-MSI-Windows-${{ matrix.artifact_arch }}-UNSIGNED-NOT-FOR-DISTRIBUTION-${{ github.sha }}
+          path: ${{ matrix.build_dir }}/windows-installer
+          if-no-files-found: error
 
   linux-tests:
     name: Linux DSP/processor tests
@@ -52,21 +261,63 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libasound2-dev libfreetype-dev libfontconfig1-dev \
-            libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxext-dev libgl1-mesa-dev
+            libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxext-dev libgl1-mesa-dev \
+            xvfb xauth openbox x11-utils
+      - name: Verify factory bank
+        run: python3 scripts/generate-presets.py --check
       - name: Configure
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
       - name: Build tests
-        run: cmake --build build --target ReverseLabTests -j"$(nproc)"
+        run: cmake --build build -j"$(nproc)"
       - name: Test
-        run: ctest --test-dir build --output-on-failure
+        run: |
+          xvfb-run -a bash -eu -o pipefail <<'BASH'
+          # JUCE caches WM_PROTOCOLS at startup, so the window manager must be ready
+          # on this same display before any CTest executable creates its desktop.
+          openbox --sm-disable >build/openbox.log 2>&1 &
+          wm_pid=$!
+          cleanup() {
+            kill "$wm_pid" 2>/dev/null || true
+            wait "$wm_pid" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
+          wm_ready=false
+          wm_ready_deadline=$((SECONDS + 10))
+          while (( SECONDS < wm_ready_deadline )); do
+            if ! kill -0 "$wm_pid" 2>/dev/null; then
+              printf '%s\n' 'Openbox exited before the test desktop became ready.' >&2
+              sed -n '1,$p' build/openbox.log >&2
+              exit 1
+            fi
+            if timeout 1 xprop -root _NET_SUPPORTING_WM_CHECK 2>/dev/null \
+                 | grep -Eq 'window id # 0x[0-9a-fA-F]*[1-9a-fA-F][0-9a-fA-F]*$' \
+               && timeout 1 xlsatoms -name WM_PROTOCOLS 2>/dev/null \
+                 | grep -Eq '^[[:space:]]*[1-9][0-9]*[[:space:]]+WM_PROTOCOLS$'; then
+              wm_ready=true
+              break
+            fi
+            sleep 0.1
+          done
+          if ! "$wm_ready"; then
+            printf '%s\n' 'Timed out waiting for Openbox and WM_PROTOCOLS on the test display.' >&2
+            sed -n '1,$p' build/openbox.log >&2
+            exit 1
+          fi
+          printf '[test-desktop] Openbox and WM_PROTOCOLS ready on %s\n' "$DISPLAY"
+          ctest --test-dir build --output-on-failure
+          BASH
 
   sanitizers:
     name: ASan + UBSan
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           submodules: recursive
+      - name: Verify factory bank
+        run: python3 scripts/generate-presets.py --check
       - name: Configure
         run: >
           cmake -S . -B build-asan -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=RelWithDebInfo
@@ -76,13 +327,16 @@ jobs:
           -DCMAKE_SHARED_LINKER_FLAGS="-fsanitize=address,undefined"
           -DCMAKE_MODULE_LINKER_FLAGS="-fsanitize=address,undefined"
       - name: Build tests
-        run: cmake --build build-asan --target ReverseLabTests ReverseLab_VST3 -j "$(sysctl -n hw.ncpu)"
+        run: cmake --build build-asan -j "$(sysctl -n hw.ncpu)"
       - name: Test
         env:
           ASAN_OPTIONS: detect_leaks=0
           UBSAN_OPTIONS: print_stacktrace=1
         run: ctest --test-dir build-asan --output-on-failure
       - name: Verify Makefiles bundle and ZIP roundtrip
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+          UBSAN_OPTIONS: print_stacktrace=1
         run: |
           bundle="build-asan/ReverseLab_artefacts/RelWithDebInfo/VST3/ReverseLab.vst3"
           codesign --verify --deep --strict "$bundle"
@@ -90,3 +344,4 @@ jobs:
           mkdir -p build-asan/artifact-roundtrip
           ditto -x -k build-asan/ReverseLab-VST3.zip build-asan/artifact-roundtrip
           codesign --verify --deep --strict build-asan/artifact-roundtrip/ReverseLab.vst3
+          build-asan/ReverseLabHostTests_artefacts/RelWithDebInfo/ReverseLabHostTests build-asan/artifact-roundtrip/ReverseLab.vst3

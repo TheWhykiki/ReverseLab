@@ -24,6 +24,20 @@ inline constexpr auto random = "random";
 inline constexpr auto seed = "seed";
 inline constexpr auto bypass = "bypass";
 
+// Stable control/DSP traversal order; independent of the host's parameter indices.
+// Preserve the existing factory-map notification order (bypass first).
+enum class Index : size_t
+{
+    bypass, crossfade, feedback, freeze, highpass, leftFreeMs, leftSize, link,
+    lowpass, mix, output, random, retrigger, rightFreeMs, rightSize, seed, speed,
+    stereoOffset, sync, count
+};
+inline constexpr std::array<const char*, static_cast<size_t>(Index::count)> ids {
+    bypass, crossfade, feedback, freeze, highpass, leftFreeMs, leftSize, link,
+    lowpass, mix, output, random, retrigger, rightFreeMs, rightSize, seed, speed,
+    stereoOffset, sync
+};
+
 inline juce::StringArray subdivisionNames()
 {
     return { "1/32", "1/16T", "1/16", "1/16D", "1/8T", "1/8", "1/8D",
@@ -34,6 +48,25 @@ inline constexpr std::array<double, 15> subdivisionBeats {
     0.125, 1.0 / 6.0, 0.25, 0.375, 1.0 / 3.0, 0.5, 0.75,
     2.0 / 3.0, 1.0, 1.5, 4.0 / 3.0, 2.0, 3.0, 4.0, 8.0
 };
+
+// Keep the host, editor text box and accessibility string conversion identical.
+// "Off" denotes the existing bypass band and parses to its canonical endpoint.
+inline juce::AudioParameterFloatAttributes filterAttributes(bool highPass)
+{
+    return juce::AudioParameterFloatAttributes().withLabel("Hz")
+        .withStringFromValueFunction([highPass](float value, int)
+        {
+            if (highPass ? value <= 20.01f : value >= 19999.0f)
+                return juce::String("Off");
+            return juce::String(value, 2).trimCharactersAtEnd("0").trimCharactersAtEnd(".") + " Hz";
+        })
+        .withValueFromStringFunction([highPass](const juce::String& text)
+        {
+            if (text.trim().equalsIgnoreCase("Off"))
+                return highPass ? 20.0f : 20000.0f;
+            return text.getFloatValue();
+        });
+}
 
 // Every parameter carries a version hint so the identifiers stay stable if an AU build is ever
 // added (the VST3 wrapper derives its IDs from the string alone and is unaffected).
@@ -57,8 +90,8 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
     layout.add(std::make_unique<APB>(juce::ParameterID { freeze, 1 }, "Freeze", false));
     layout.add(std::make_unique<APB>(juce::ParameterID { retrigger, 1 }, "Retrigger", false));
     layout.add(std::make_unique<APF>(juce::ParameterID { feedback, 1 }, "Feedback", juce::NormalisableRange<float>(0.0f, 95.0f, 0.01f), 0.0f, "%"));
-    layout.add(std::make_unique<APF>(juce::ParameterID { highpass, 1 }, "High-pass", juce::NormalisableRange<float>(20.0f, 1000.0f, 0.01f, 0.35f), 20.0f, "Hz"));
-    layout.add(std::make_unique<APF>(juce::ParameterID { lowpass, 1 }, "Low-pass", juce::NormalisableRange<float>(1000.0f, 20000.0f, 0.01f, 0.35f), 20000.0f, "Hz"));
+    layout.add(std::make_unique<APF>(juce::ParameterID { highpass, 1 }, "High-pass", juce::NormalisableRange<float>(20.0f, 1000.0f, 0.01f, 0.35f), 20.0f, filterAttributes(true)));
+    layout.add(std::make_unique<APF>(juce::ParameterID { lowpass, 1 }, "Low-pass", juce::NormalisableRange<float>(1000.0f, 20000.0f, 0.01f, 0.35f), 20000.0f, filterAttributes(false)));
     layout.add(std::make_unique<APF>(juce::ParameterID { stereoOffset, 1 }, "Stereo Offset", juce::NormalisableRange<float>(-100.0f, 100.0f, 0.01f), 0.0f, "%"));
     layout.add(std::make_unique<APF>(juce::ParameterID { random, 1 }, "Random", juce::NormalisableRange<float>(0.0f, 100.0f, 0.01f), 0.0f, "%"));
     layout.add(std::make_unique<API>(juce::ParameterID { seed, 1 }, "Random Seed", 1, 999999, 4242));

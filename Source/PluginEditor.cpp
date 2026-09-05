@@ -167,10 +167,13 @@ void ScopeComponent::paint(juce::Graphics& g)
 ReverseLabAudioProcessorEditor::ReverseLabAudioProcessorEditor(ReverseLabAudioProcessor& p)
     : AudioProcessorEditor(&p), pluginProcessor(p), scope(p), presetBar(p.presets)
 {
+    // setResizeLimits() constrains the editor's initial 0x0 bounds and may call
+    // resized(), which persists the transient minimum size. Capture the actual
+    // processor-owned size before configuring those bounds.
+    const auto savedSize = pluginProcessor.getLastEditorSize();
     setLookAndFeel(&lookAndFeel);
     setResizable(true, true);
     setResizeLimits(720, 460, 1440, 920);
-    const auto savedSize = pluginProcessor.getLastEditorSize();
     setSize(savedSize.x, savedSize.y);
     pluginProcessor.acknowledgeRestoredEditorSize(savedSize.x, savedSize.y);
     title.setText("ReverseLab", juce::dontSendNotification);

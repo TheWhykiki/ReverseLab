@@ -233,11 +233,11 @@ if(APPLE)
     # Keep JUCE's existing CXX toolchain for .mm files so CMAKE_CXX_FLAGS
     # (including sanitizer instrumentation) still apply to every such source.
     target_sources(ReverseLabPresetTests PRIVATE Tests/NativeFilePanel.mm)
-    # A fresh process per native panel transition prevents one AppKit modal
-    # session from poisoning a later case and gives each real panel a tight,
-    # independently reported deadline.
+    # A fresh process per transition gives each real panel a tight,
+    # independently reported failure. The sequential test below separately
+    # proves that no AppKit modal state leaks from one case into the next.
     foreach(native_operation IN ITEMS import export)
-        foreach(native_action IN ITEMS ancestor-hide detach destroy)
+        foreach(native_action IN ITEMS ancestor-hide detach destroy hide-then-destroy)
             set(native_case "${native_operation}-${native_action}")
             string(REPLACE "-" "_" native_case_id "${native_case}")
             set(native_test "ReverseLabNativeChooser_${native_case_id}")
@@ -248,4 +248,12 @@ if(APPLE)
             set_tests_properties("${native_test}" PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
         endforeach()
     endforeach()
+    # Also run every transition in one process. This catches a native modal
+    # session that appears closed but poisons the next chooser; isolated cases
+    # alone cannot detect that lifecycle leak.
+    add_test(NAME ReverseLabNativeChoosersSequential COMMAND "${CMAKE_COMMAND}" -E env
+        --unset=WHYKIKI_PRESET_TEST_NATIVE_CASE
+        "WHYKIKI_PRESET_TEST_NATIVE_ONLY=1"
+        "$<TARGET_FILE:ReverseLabPresetTests>")
+    set_tests_properties(ReverseLabNativeChoosersSequential PROPERTIES TIMEOUT 480 RUN_SERIAL TRUE)
 endif()

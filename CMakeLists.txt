@@ -10,6 +10,11 @@ project(ReverseLab VERSION 1.1.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+if(MSVC)
+    # The standalone VST3/MSI must also run on clean Windows installations that
+    # do not already have a matching Visual C++ Redistributable installed.
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
 
 add_subdirectory(external/JUCE)
 
@@ -101,13 +106,22 @@ include(cmake/Updater.cmake)
 wk_add_updater(ReverseLab)
 
 if(APPLE)
-    # JUCE creates moduleinfo.json after its first signing pass. Re-sign the completed bundle so
-    # the generated metadata is covered by the final resource seal for every CMake generator.
+    # The updater command above embeds the helper first. Sign nested code inside-out, then sign
+    # the completed VST3 root so moduleinfo.json and the helper are covered by its resource seal.
     find_program(REVERSELAB_CODESIGN_EXECUTABLE codesign REQUIRED)
+    set(REVERSELAB_CODESIGN_IDENTITY "-" CACHE STRING
+        "Final VST3/updater signing identity; '-' selects ad-hoc signing")
+    set(REVERSELAB_CODESIGN_OPTIONS --force --sign "${REVERSELAB_CODESIGN_IDENTITY}")
+    if(NOT REVERSELAB_CODESIGN_IDENTITY STREQUAL "-")
+        list(APPEND REVERSELAB_CODESIGN_OPTIONS --options runtime --timestamp)
+    endif()
     add_custom_command(TARGET ReverseLab_VST3 POST_BUILD
-        COMMAND "${REVERSELAB_CODESIGN_EXECUTABLE}" --force --sign - "$<TARGET_BUNDLE_DIR:ReverseLab_VST3>"
+        COMMAND "${REVERSELAB_CODESIGN_EXECUTABLE}" ${REVERSELAB_CODESIGN_OPTIONS}
+            "$<TARGET_BUNDLE_DIR:ReverseLab_VST3>/Contents/Helpers/ReverseLabUpdater.app"
+        COMMAND "${REVERSELAB_CODESIGN_EXECUTABLE}" ${REVERSELAB_CODESIGN_OPTIONS}
+            "$<TARGET_BUNDLE_DIR:ReverseLab_VST3>"
         COMMAND "${REVERSELAB_CODESIGN_EXECUTABLE}" --verify --deep --strict --verbose=2 "$<TARGET_BUNDLE_DIR:ReverseLab_VST3>"
-        COMMENT "Signing completed ReverseLab VST3 bundle"
+        COMMENT "Signing ReverseLab updater and completed VST3 bundle inside-out"
         VERBATIM)
 endif()
 
@@ -161,6 +175,14 @@ endif()
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 add_test(NAME ReverseLabBuildPortability COMMAND "${Python3_EXECUTABLE}" -B -m unittest discover
     -s "${CMAKE_CURRENT_SOURCE_DIR}/scripts/tests" -p "test_build_portability.py")
+add_test(NAME ReverseLabWindowsUpdaterContract COMMAND "${Python3_EXECUTABLE}" -B -m unittest discover
+    -s "${CMAKE_CURRENT_SOURCE_DIR}/scripts/tests" -p "test_windows_updater.py")
+add_test(NAME ReverseLabWindowsInstallerContract COMMAND "${Python3_EXECUTABLE}" -B -m unittest discover
+    -s "${CMAKE_CURRENT_SOURCE_DIR}/scripts/tests" -p "test_windows_installer_contract.py")
+add_test(NAME ReverseLabWindowsIntegrationContract COMMAND "${Python3_EXECUTABLE}" -B -m unittest discover
+    -s "${CMAKE_CURRENT_SOURCE_DIR}/scripts/tests" -p "test_windows_integration.py")
+add_test(NAME ReverseLabWindowsReleaseContract COMMAND "${Python3_EXECUTABLE}" -B -m unittest discover
+    -s "${CMAKE_CURRENT_SOURCE_DIR}/scripts/tests" -p "test_windows_release_contract.py")
 # These harnesses exercise macOS release/install scripts with POSIX permissions,
 # signals, symlinks and /bin/bash. Their fake-tool tests are useful on macOS and
 # Linux, but registering them on Windows would be a platform error rather than a
@@ -211,4 +233,19 @@ if(APPLE)
     # Keep JUCE's existing CXX toolchain for .mm files so CMAKE_CXX_FLAGS
     # (including sanitizer instrumentation) still apply to every such source.
     target_sources(ReverseLabPresetTests PRIVATE Tests/NativeFilePanel.mm)
+    # A fresh process per native panel transition prevents one AppKit modal
+    # session from poisoning a later case and gives each real panel a tight,
+    # independently reported deadline.
+    foreach(native_operation IN ITEMS import export)
+        foreach(native_action IN ITEMS ancestor-hide detach destroy)
+            set(native_case "${native_operation}-${native_action}")
+            string(REPLACE "-" "_" native_case_id "${native_case}")
+            set(native_test "ReverseLabNativeChooser_${native_case_id}")
+            add_test(NAME "${native_test}" COMMAND "${CMAKE_COMMAND}" -E env
+                "WHYKIKI_PRESET_TEST_NATIVE_ONLY=1"
+                "WHYKIKI_PRESET_TEST_NATIVE_CASE=${native_case}"
+                "$<TARGET_FILE:ReverseLabPresetTests>")
+            set_tests_properties("${native_test}" PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
+        endforeach()
+    endforeach()
 endif()

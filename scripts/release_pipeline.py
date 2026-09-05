@@ -170,16 +170,26 @@ def validate_options(root, configuration, version_override, environment):
     app = environment.get("REVERSELAB_APPLICATION_IDENTITY", "").strip()
     installer = environment.get("REVERSELAB_INSTALLER_IDENTITY", "").strip()
     notary = environment.get("REVERSELAB_NOTARY_PROFILE", "").strip()
+    notary_keychain_value = environment.get("REVERSELAB_NOTARY_KEYCHAIN", "").strip()
     if bool(app) != bool(installer) or (notary and not (app and installer)):
         raise ReleaseError("Signed/notarized releases require both application and installer identities")
+    if bool(notary) != bool(notary_keychain_value):
+        raise ReleaseError("Notarization requires both a profile and its explicit keychain path")
     if app == "-" or installer == "-":
         raise ReleaseError("For ad-hoc builds leave both identities unset; '-' is not a distribution identity")
+    notary_keychain = None
+    if notary_keychain_value:
+        candidate_keychain = Path(notary_keychain_value)
+        if (not candidate_keychain.is_absolute() or candidate_keychain.is_symlink()
+                or not candidate_keychain.is_file()):
+            raise ReleaseError("REVERSELAB_NOTARY_KEYCHAIN must be an existing absolute regular file")
+        notary_keychain = str(candidate_keychain.resolve(strict=True))
     jobs = environment.get("REVERSELAB_BUILD_JOBS", "2")
     if not jobs.isdigit() or not 1 <= int(jobs) <= 64:
         raise ReleaseError("REVERSELAB_BUILD_JOBS must be an integer between 1 and 64")
     if (root / "dist").is_symlink():
         raise ReleaseError("Refusing a symlinked dist directory")
-    return version, app, installer, notary, jobs
+    return version, app, installer, notary, notary_keychain, jobs
 
 
 def validate_bundle(bundle, version, runner):
@@ -191,7 +201,7 @@ def validate_bundle(bundle, version, runner):
     if not binary.is_file() or not os.access(binary, os.X_OK):
         raise ReleaseError("Missing or non-executable VST3 binary")
     architectures = runner(["lipo", "-archs", binary], capture=True).stdout.split()
-    if set(architectures) != {"arm64", "x86_64"}:
+    if len(architectures) != 2 or set(architectures) != {"arm64", "x86_64"}:
         raise ReleaseError("Release VST3 must contain exactly arm64 and x86_64")
     for architecture in architectures:
         output = runner(["xcrun", "vtool", "-arch", architecture, "-show-build", binary], capture=True).stdout
@@ -207,7 +217,8 @@ def validate_bundle(bundle, version, runner):
     helper_binary = helper / "Contents/MacOS/ReverseLabUpdater"
     if not os.access(helper_binary, os.X_OK):
         raise ReleaseError("Missing executable updater")
-    if set(runner(["lipo", "-archs", helper_binary], capture=True).stdout.split()) != {"arm64", "x86_64"}:
+    helper_architectures = runner(["lipo", "-archs", helper_binary], capture=True).stdout.split()
+    if len(helper_architectures) != 2 or set(helper_architectures) != {"arm64", "x86_64"}:
         raise ReleaseError("Embedded updater has incorrect architectures")
     return file_hash(binary)
 
@@ -298,7 +309,9 @@ def retain_failure_evidence(stage):
 def package_release(root, configuration="Release", version_override=None, environment=None, runner=run):
     root = Path(root).resolve()
     environment = os.environ if environment is None else environment
-    version, app, installer, notary, jobs = validate_options(root, configuration, version_override, environment)
+    version, app, installer, notary, notary_keychain, jobs = validate_options(
+        root, configuration, version_override, environment
+    )
     if platform.system() != "Darwin":
         raise ReleaseError("macOS distribution tools are required")
     required_tools = ["cmake", "ctest", "codesign", "ditto", "pkgbuild", "pkgutil", "lipo", "xcrun"]
@@ -344,14 +357,16 @@ def package_release(root, configuration="Release", version_override=None, enviro
         diagnostics["step"] = "stage_bundle"
         runner(["ditto", bundle, staged_bundle])
         diagnostics["step"] = "sign_bundle"
+        signing_identity = app or "-"
+        signing_options = ["codesign", "--force", "--sign", signing_identity]
         if app:
-            runner(["codesign", "--force", "--options", "runtime", "--timestamp", "--sign", app,
-                    staged_bundle / "Contents/Helpers/ReverseLabUpdater.app"])
-            runner(["codesign", "--force", "--options", "runtime", "--timestamp", "--sign", app,
-                    staged_bundle])
+            signing_options += ["--options", "runtime", "--timestamp"]
         else:
             print("Warning: ad-hoc VST3 and unsigned installer; no notarization claim.")
-            runner(["codesign", "--force", "--sign", "-", staged_bundle])
+        # Sign nested code inside-out. Recursive --deep signing can hide missing
+        # rules and is intentionally reserved for verification below.
+        runner(signing_options + [staged_bundle / "Contents/Helpers/ReverseLabUpdater.app"])
+        runner(signing_options + [staged_bundle])
         packaged_hash = validate_bundle(staged_bundle, version, runner)
         artifacts = stage / "artifacts"
         artifacts.mkdir()
@@ -375,6 +390,7 @@ def package_release(root, configuration="Release", version_override=None, enviro
         if notary:
             diagnostics["step"] = "notary_submit"
             response = runner(["xcrun", "notarytool", "submit", package, "--keychain-profile", notary,
+                               "--keychain", notary_keychain,
                                "--wait", "--output-format", "json"], capture=True)
             submit_raw = response.stdout if isinstance(response.stdout, str) else ""
             (stage / "notary-submit.json").write_text(submit_raw)
@@ -385,7 +401,8 @@ def package_release(root, configuration="Release", version_override=None, enviro
             # for an Invalid job, so a failed candidate retains actionable evidence.
             diagnostics["step"] = "notary_log"
             log_response = runner(["xcrun", "notarytool", "log", str(notary_submission_id),
-                                   "--keychain-profile", notary], capture=True)
+                                   "--keychain-profile", notary,
+                                   "--keychain", notary_keychain], capture=True)
             log_raw = log_response.stdout if isinstance(log_response.stdout, str) else ""
             (stage / "notary-log.json").write_text(log_raw)
             validate_notary_log(log_raw, notary_submission_id)

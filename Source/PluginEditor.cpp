@@ -176,7 +176,7 @@ ReverseLabAudioProcessorEditor::ReverseLabAudioProcessorEditor(ReverseLabAudioPr
     title.setText("ReverseLab", juce::dontSendNotification);
     title.setFont(juce::Font(juce::FontOptions(27.0f, juce::Font::bold)));
     title.setColour(juce::Label::textColourId, text);
-    subtitle.setText("STUDIO INSTRUMENT", juce::dontSendNotification);
+    subtitle.setText("STUDIO EFFECT", juce::dontSendNotification);
     subtitle.setFont(juce::Font(juce::FontOptions(10.5f, juce::Font::bold)));
     subtitle.setColour(juce::Label::textColourId, accent);
     latencyLabel.setColour(juce::Label::textColourId, muted);

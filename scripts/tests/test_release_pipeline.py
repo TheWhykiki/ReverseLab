@@ -23,12 +23,13 @@ DISTRIBUTION_ENV = {"REVERSELAB_APPLICATION_IDENTITY": "app",
 class FakeTools:
     def __init__(self, fail=None, version="1.0.4", arches="arm64 x86_64", notary_status="Accepted",
                  corrupt=None, fail_host_at=None, notary_submit_output=None, notary_log_output=None,
-                 fail_spctl_at=None):
+                 fail_spctl_at=None, helper_arches=None):
         self.commands = []
         self.fail, self.version, self.arches = fail, version, arches
         self.notary_status = notary_status
         self.corrupt, self.fail_host_at, self.host_calls = corrupt, fail_host_at, 0
         self.fail_spctl_at, self.spctl_calls = fail_spctl_at, 0
+        self.helper_arches = arches if helper_arches is None else helper_arches
         self.notary_submit_output = (json.dumps({"id": NOTARY_ID, "status": notary_status})
                                      if notary_submit_output is None else notary_submit_output)
         self.notary_log_output = (json.dumps(
@@ -74,7 +75,7 @@ class FakeTools:
             test_log.parent.mkdir(parents=True)
             test_log.write_text("Fake test log for pipeline unit tests\n")
         elif tool == "lipo":
-            output = self.arches
+            output = self.helper_arches if parts[-1].endswith("Updater") else self.arches
         elif tool == "xcrun" and parts[1] == "vtool":
             output = "minos 11.0\n"
         elif tool == "xcrun" and parts[1:3] == ["notarytool", "submit"]:
@@ -130,6 +131,12 @@ class ReleasePipelineTests(unittest.TestCase):
                          "commit", "-qm", "fixture"]):
             subprocess.run(command, cwd=self.root, check=True, capture_output=True)
         (self.root / "dist").mkdir()
+        self.notary_keychain = self.root / "dist/test-notary.keychain-db"
+        self.notary_keychain.write_bytes(b"test keychain")
+        self.distribution_env = {
+            **DISTRIBUTION_ENV,
+            "REVERSELAB_NOTARY_KEYCHAIN": str(self.notary_keychain),
+        }
         self.previous = self.root / "dist/previous.pkg"
         self.previous.write_bytes(b"keep previous release")
         self.addCleanup(patch.stopall)
@@ -143,7 +150,7 @@ class ReleasePipelineTests(unittest.TestCase):
     def assertPreviousPreserved(self):
         self.assertEqual(self.previous.read_bytes(), b"keep previous release")
         for entry in (self.root / "dist").iterdir():
-            if entry == self.previous:
+            if entry in (self.previous, self.notary_keychain):
                 continue
             self.assertTrue(entry.is_dir() and entry.name.startswith("failed-run-"), entry)
             self.assertEqual(json.loads((entry / "failure.json").read_text())["status"], "failed")
@@ -221,7 +228,8 @@ class ReleasePipelineTests(unittest.TestCase):
             self.package(FakeTools(fail="pkgbuild"),
                          {"REVERSELAB_APPLICATION_IDENTITY": "private-app-identity-marker",
                           "REVERSELAB_INSTALLER_IDENTITY": "private-installer-identity-marker",
-                          "REVERSELAB_NOTARY_PROFILE": "private-notary-profile-marker"})
+                          "REVERSELAB_NOTARY_PROFILE": "private-notary-profile-marker",
+                          "REVERSELAB_NOTARY_KEYCHAIN": str(self.notary_keychain)})
         report, = (self.root / "dist").glob("failed-run-*")
         text = (report / "failure.json").read_text()
         for marker in ("private-app-identity-marker", "private-installer-identity-marker", "private-notary-profile-marker"):
@@ -232,6 +240,11 @@ class ReleasePipelineTests(unittest.TestCase):
         for options, environment in [({"configuration": "Debug"}, {}),
                                      ({"version_override": "2.0.0"}, {}),
                                      ({}, {"REVERSELAB_NOTARY_PROFILE": "profile"}),
+                                     ({}, {"REVERSELAB_NOTARY_KEYCHAIN": str(self.notary_keychain)}),
+                                     ({}, {**DISTRIBUTION_ENV,
+                                           "REVERSELAB_NOTARY_KEYCHAIN": "relative.keychain-db"}),
+                                     ({}, {**DISTRIBUTION_ENV,
+                                           "REVERSELAB_NOTARY_KEYCHAIN": str(self.root / "missing.keychain-db")}),
                                      ({}, {"REVERSELAB_APPLICATION_IDENTITY": "app"}),
                                      ({}, {"REVERSELAB_APPLICATION_IDENTITY": "-", "REVERSELAB_INSTALLER_IDENTITY": "-"}),
                                      ({}, {"REVERSELAB_BUILD_JOBS": "0"})]:
@@ -241,6 +254,21 @@ class ReleasePipelineTests(unittest.TestCase):
                     self.package(tools, environment, **options)
                 self.assertEqual(tools.commands, [])
                 self.assertPreviousPreserved()
+
+    def test_cmake_embeds_then_signs_helper_and_root_inside_out(self):
+        repository = Path(__file__).resolve().parents[2]
+        cmake = (repository / "CMakeLists.txt").read_text()
+        updater_cmake = (repository / "cmake/Updater.cmake").read_text()
+        self.assertLess(cmake.index("wk_add_updater(ReverseLab)"),
+                        cmake.index("add_custom_command(TARGET ReverseLab_VST3 POST_BUILD"))
+        self.assertIn("copy_directory", updater_cmake)
+        signing = cmake.split("add_custom_command(TARGET ReverseLab_VST3 POST_BUILD", 1)[1].split("endif()", 1)[0]
+        self.assertLess(signing.index("Contents/Helpers/ReverseLabUpdater.app"),
+                        signing.index('"$<TARGET_BUNDLE_DIR:ReverseLab_VST3>"'))
+        self.assertNotIn("--deep --sign", signing)
+        self.assertEqual(signing.count("--deep"), 1)
+        self.assertEqual(signing.count("--verify --deep --strict"), 1)
+        self.assertIn('set(REVERSELAB_CODESIGN_IDENTITY "-" CACHE STRING', cmake)
 
     def test_build_test_sign_package_and_host_failures_preserve_previous_artifacts(self):
         for tool in ("cmake", "ctest", "codesign", "pkgbuild", "pkgutil", "ReverseLabHostTests"):
@@ -264,7 +292,8 @@ class ReleasePipelineTests(unittest.TestCase):
                 self.assertPreviousPreserved()
 
     def test_wrong_bundle_version_or_architecture_never_publishes(self):
-        for tools in (FakeTools(version="1.0.3"), FakeTools(arches="arm64")):
+        for tools in (FakeTools(version="1.0.3"), FakeTools(arches="arm64"),
+                      FakeTools(arches="arm64 x86_64 arm64")):
             with self.assertRaises(pipeline.ReleaseError):
                 self.package(tools)
             self.assertPreviousPreserved()
@@ -281,10 +310,15 @@ class ReleasePipelineTests(unittest.TestCase):
             self.package(remove_helper)
         self.assertPreviousPreserved()
 
+    def test_wrong_embedded_updater_architecture_never_publishes(self):
+        with self.assertRaisesRegex(pipeline.ReleaseError, "updater has incorrect architectures"):
+            self.package(FakeTools(helper_arches="arm64"))
+        self.assertPreviousPreserved()
+
     def test_notary_invalid_status_never_publishes_even_if_command_exits_zero(self):
         tools = FakeTools(notary_status="Invalid")
         with self.assertRaisesRegex(pipeline.ReleaseError, "log did not report an accepted job"):
-            self.package(tools, DISTRIBUTION_ENV)
+            self.package(tools, self.distribution_env)
         commands = [command[1:3] for command in tools.commands if Path(command[0]).name == "xcrun"]
         self.assertIn(["notarytool", "log"], commands, "Invalid submissions must still retain Apple's full log")
         report, = (self.root / "dist").glob("failed-run-*")
@@ -300,7 +334,7 @@ class ReleasePipelineTests(unittest.TestCase):
                 before = set((self.root / "dist").glob("failed-run-*"))
                 tools = FakeTools(notary_submit_output=raw_submit)
                 with self.assertRaises(pipeline.ReleaseError):
-                    self.package(tools, DISTRIBUTION_ENV)
+                    self.package(tools, self.distribution_env)
                 report, = set((self.root / "dist").glob("failed-run-*")) - before
                 self.assertEqual((report / "notary-submit.json").read_text(), raw_submit)
                 self.assertFalse((report / "notary-log.json").exists())
@@ -310,7 +344,7 @@ class ReleasePipelineTests(unittest.TestCase):
 
     def test_notarized_candidate_retains_logs_and_passes_final_gatekeeper_assessments(self):
         tools = FakeTools()
-        candidate = self.package(tools, DISTRIBUTION_ENV)
+        candidate = self.package(tools, self.distribution_env)
         commands = tools.commands
         submit_index = next(i for i, command in enumerate(commands)
                             if [Path(command[0]).name, *command[1:3]] == ["xcrun", "notarytool", "submit"])
@@ -327,7 +361,16 @@ class ReleasePipelineTests(unittest.TestCase):
 
         notary_log_command = commands[log_index]
         self.assertEqual(notary_log_command[1:4], ["notarytool", "log", NOTARY_ID])
-        self.assertEqual(notary_log_command[4:], ["--keychain-profile", "profile"])
+        self.assertEqual(
+            notary_log_command[4:],
+            ["--keychain-profile", "profile", "--keychain", str(self.notary_keychain.resolve())],
+        )
+        notary_submit_command = commands[submit_index]
+        self.assertIn("--keychain-profile", notary_submit_command)
+        self.assertEqual(
+            notary_submit_command[notary_submit_command.index("--keychain") + 1],
+            str(self.notary_keychain.resolve()),
+        )
         package_assessment, vst3_assessment = (commands[index] for index in spctl_indices)
         self.assertEqual(package_assessment[1:5], ["--assess", "--type", "install", "--verbose=4"])
         self.assertTrue(package_assessment[-1].endswith(".pkg"))
@@ -340,8 +383,19 @@ class ReleasePipelineTests(unittest.TestCase):
                         if Path(command[0]).name == "codesign" and "--verify" in command]
         self.assertTrue(signing)
         self.assertTrue(verification)
+        self.assertEqual(len(signing), 2)
         self.assertTrue(all("--deep" not in command for command in signing))
+        self.assertTrue(all(command[command.index("--sign") + 1] == "app" for command in signing))
+        self.assertTrue(all("--options" in command and "runtime" in command and "--timestamp" in command
+                            for command in signing))
         self.assertTrue(all("--deep" in command and "--strict" in command for command in verification))
+        helper_sign = next(i for i, command in enumerate(commands)
+                           if Path(command[0]).name == "codesign" and "--sign" in command
+                           and command[-1].endswith("ReverseLabUpdater.app"))
+        root_sign = next(i for i, command in enumerate(commands)
+                         if Path(command[0]).name == "codesign" and "--sign" in command
+                         and command[-1].endswith("ReverseLab.vst3"))
+        self.assertLess(helper_sign, root_sign)
 
         expected_evidence = {"notary-submit.json", "notary-log.json",
                              "gatekeeper-package.log", "gatekeeper-vst3.log"}
@@ -370,7 +424,7 @@ class ReleasePipelineTests(unittest.TestCase):
                 before = set((self.root / "dist").glob("failed-run-*"))
                 tools = FakeTools(notary_log_output=raw_log)
                 with self.assertRaises(pipeline.ReleaseError):
-                    self.package(tools, DISTRIBUTION_ENV)
+                    self.package(tools, self.distribution_env)
                 report, = set((self.root / "dist").glob("failed-run-*")) - before
                 self.assertEqual(json.loads((report / "failure.json").read_text())["step"], "notary_log")
                 self.assertEqual((report / "notary-submit.json").read_text(), tools.notary_submit_output)
@@ -392,7 +446,7 @@ class ReleasePipelineTests(unittest.TestCase):
                 before = set((self.root / "dist").glob("failed-run-*"))
                 tools = FakeTools(fail_spctl_at=invocation)
                 with self.assertRaises(subprocess.CalledProcessError) as raised:
-                    self.package(tools, DISTRIBUTION_ENV)
+                    self.package(tools, self.distribution_env)
                 self.assertEqual(raised.exception.returncode, 3)
                 report, = set((self.root / "dist").glob("failed-run-*")) - before
                 details = json.loads((report / "failure.json").read_text())
@@ -421,8 +475,18 @@ class ReleasePipelineTests(unittest.TestCase):
                             for value in manifest["verification"]))
         signing = [command for command in commands
                    if Path(command[0]).name == "codesign" and "--sign" in command]
-        self.assertTrue(signing)
+        self.assertEqual(len(signing), 2)
         self.assertTrue(all("--deep" not in command for command in signing))
+        self.assertTrue(all(command[command.index("--sign") + 1] == "-" for command in signing))
+        self.assertTrue(all("--options" not in command and "--timestamp" not in command
+                            for command in signing))
+        helper_sign = next(i for i, command in enumerate(commands)
+                           if Path(command[0]).name == "codesign" and "--sign" in command
+                           and command[-1].endswith("ReverseLabUpdater.app"))
+        root_sign = next(i for i, command in enumerate(commands)
+                         if Path(command[0]).name == "codesign" and "--sign" in command
+                         and command[-1].endswith("ReverseLab.vst3"))
+        self.assertLess(helper_sign, root_sign)
 
     def test_corrupted_zip_or_installer_payload_is_not_published(self):
         for location in ("zip", "payload"):
@@ -460,6 +524,9 @@ class ReleasePipelineTests(unittest.TestCase):
         self.assertEqual(commands.count("ReverseLabHostTests"), 2)
         self.assertTrue((candidate / "ctest-results.xml").is_file())
         self.assertTrue((candidate / "CTest-LastTest.log").is_file())
+        self.assertTrue((candidate / "ReverseLab-1.0.4-macOS-universal.pkg").is_file())
+        self.assertTrue((candidate / "ReverseLab-1.0.4-macOS-universal-VST3.zip").is_file())
+        self.assertIn("both_macos11_slices", manifest["verification"])
         for name, expected in manifest["artifacts"].items():
             self.assertEqual(pipeline.file_hash(candidate / name), expected)
 

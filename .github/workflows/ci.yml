@@ -92,7 +92,8 @@ jobs:
             dumpbin_host: Hostx64
             dumpbin_target: x64
             arm64x_image: "false"
-            artifact_arch: x86_64
+            artifact_arch: x64
+            installer_arch: x64
           - display: Arm64EC (Windows on Arm)
             runner: windows-11-vs2026-arm
             runner_arch: ARM64
@@ -105,6 +106,7 @@ jobs:
             dumpbin_target: arm64
             arm64x_image: "true"
             artifact_arch: arm64ec
+            installer_arch: arm64ec
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -127,6 +129,11 @@ jobs:
           -A ${{ matrix.platform }}
       - name: Build
         run: cmake --build ${{ matrix.build_dir }} --config Release --parallel 2
+      - name: Compile Windows updater safety and production shapes
+        run: >
+          cmake --build ${{ matrix.build_dir }} --config Release --parallel 2 --target
+          ReverseLabWindowsUpdaterPolicyTests ReverseLabWindowsUpdaterSelfTests
+          ReverseLabWindowsUpdaterProductionShape ReverseLabWindowsUpdaterLauncherShape
       - name: Verify Windows VST3 bundle architecture and manifest
         shell: pwsh
         run: |
@@ -186,7 +193,7 @@ jobs:
         run: |
           $build = '${{ matrix.build_dir }}'
           $bundle = (Resolve-Path -LiteralPath "$build/ReverseLab_artefacts/Release/VST3/ReverseLab.vst3").Path
-          $archive = 'ReverseLab-Windows-${{ matrix.artifact_arch }}-VST3.zip'
+          $archive = 'ReverseLab-Windows-${{ matrix.artifact_arch }}-VST3-UNSIGNED-NOT-FOR-DISTRIBUTION.zip'
           $roundtrip = Join-Path $build 'artifact-roundtrip'
           Compress-Archive -LiteralPath $bundle -DestinationPath $archive
           Expand-Archive -LiteralPath $archive -DestinationPath $roundtrip
@@ -214,10 +221,33 @@ jobs:
           }
           & "$build/ReverseLabHostTests_artefacts/Release/ReverseLabHostTests.exe" $restored
           if ($LASTEXITCODE -ne 0) { throw "Extracted VST3 host test failed with exit code $LASTEXITCODE" }
+      - name: Build and validate unsigned Windows MSI candidate
+        shell: pwsh
+        run: |
+          $build = '${{ matrix.build_dir }}'
+          $versionEntry = @(Get-Content -LiteralPath "$build/CMakeCache.txt" |
+            Where-Object { $_ -like 'CMAKE_PROJECT_VERSION:STATIC=*' })
+          if ($versionEntry.Count -ne 1) { throw 'Cannot resolve the exact CMake project version' }
+          $version = ($versionEntry[0] -split '=', 2)[1]
+          $bundle = (Resolve-Path -LiteralPath "$build/ReverseLab_artefacts/Release/VST3/ReverseLab.vst3").Path
+          $hostTestBinary = (Resolve-Path -LiteralPath "$build/ReverseLabHostTests_artefacts/Release/ReverseLabHostTests.exe").Path
+          pwsh -NoProfile -File scripts/build-windows-installer.ps1 `
+            -Architecture '${{ matrix.installer_arch }}' `
+            -BundlePath $bundle `
+            -Version $version `
+            -OutputDirectory "$build/windows-installer" `
+            -HostTestPath $hostTestBinary `
+            -AllowUnsigned
+          if ($LASTEXITCODE -ne 0) { throw 'Windows MSI validation failed' }
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: ReverseLab-Windows-${{ matrix.artifact_arch }}-${{ github.sha }}
-          path: ReverseLab-Windows-${{ matrix.artifact_arch }}-VST3.zip
+          name: ReverseLab-Windows-${{ matrix.artifact_arch }}-VST3-UNSIGNED-NOT-FOR-DISTRIBUTION
+          path: ReverseLab-Windows-${{ matrix.artifact_arch }}-VST3-UNSIGNED-NOT-FOR-DISTRIBUTION.zip
+          if-no-files-found: error
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ReverseLab-MSI-Windows-${{ matrix.artifact_arch }}-UNSIGNED-NOT-FOR-DISTRIBUTION-${{ github.sha }}
+          path: ${{ matrix.build_dir }}/windows-installer
           if-no-files-found: error
 
   linux-tests:

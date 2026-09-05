@@ -230,7 +230,7 @@ def main():
     summary = root / "stress-summary.txt"
     if summary.exists():
         try:
-            result["host_summary"] = summary.read_text()
+            result["host_summary"] = summary.read_text(encoding="utf-8")
         except (OSError, UnicodeError) as error:
             errors.append(input_error("host_summary", (summary,), error))
     result["analysis_completed"] = not errors
@@ -244,7 +244,8 @@ def main():
                         and result["recall_check"]["passed"] is not False)
     destination = args.output_directory.resolve() if args.output_directory else root
     destination.mkdir(parents=True, exist_ok=True)
-    (destination / "audio-analysis.json").write_text(json.dumps(result, indent=2, allow_nan=False) + "\n")
+    (destination / "audio-analysis.json").write_text(
+        json.dumps(result, indent=2, allow_nan=False) + "\n", encoding="utf-8")
     lines = ["# Host audio evidence", "", f"Folder: `{root.name}`", "",
              f"Run: `{result['run_id']}`. Analysed at (UTC): {result['analysed_at_utc']}.", "",
              f"Overall checks: **{'PASS' if result['passed'] else 'FAIL'}**. "
@@ -292,7 +293,7 @@ def main():
     if "tail_resolution" in result:
         lines += ["", "## Tail result", "", result["tail_resolution"]]
     lines += ["", "## Limits", ""] + [f"- {v}" for v in result["limits"]]
-    (destination / "audio-analysis.md").write_text("\n".join(lines) + "\n")
+    (destination / "audio-analysis.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     print(json.dumps({"json": str(destination / "audio-analysis.json"), "markdown": str(destination / "audio-analysis.md"),
                       "run_id": result["run_id"], "analysed_at_utc": result["analysed_at_utc"],
                       "analysis_completed": result["analysis_completed"], "input_errors": result["input_errors"],

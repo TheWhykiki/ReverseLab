@@ -16,10 +16,12 @@ The 1.1.0 source includes acceptance fixes that may not yet be in the latest dow
 
 Download the current `.pkg` from [GitHub Releases](https://github.com/TheWhykiki/ReverseLab/releases/latest), open it, and follow the installer. It installs the universal VST3 into `/Library/Audio/Plug-Ins/VST3`. Restart Cubase or trigger a plug-in rescan afterwards.
 
-The published installer described here is macOS-only. Windows x86_64 and
-Windows-on-Arm builds are covered by the source and CI configuration below, but
-there is not yet a signed Windows installer or a documented Windows DAW
-acceptance result in this repository.
+The currently published installer described here is macOS-only. The source now
+contains separate Windows x64 and ARM64EC MSI/updater paths; CI builds and fully
+extracts both as explicitly unsigned test candidates. A signed public Windows
+installer and documented Windows DAW acceptance still require the real
+distribution certificate and physical x64/Arm systems. The gated publication
+contract is documented in [WINDOWS_RELEASE.md](WINDOWS_RELEASE.md).
 
 The VST3 inside the current release is ad-hoc signed, but the `.pkg` itself is unsigned and the release is not Apple-notarized. Gatekeeper will therefore block the installer on first launch. Open it once, then go to **System Settings → Privacy & Security** and choose **Open Anyway**. Alternatively unzip the raw VST3 from the release, copy it to `~/Library/Audio/Plug-Ins/VST3`, and remove its quarantine flag with `xattr -dr com.apple.quarantine ~/Library/Audio/Plug-Ins/VST3/ReverseLab.vst3`. The release also includes SHA-256 checksums.
 
@@ -57,6 +59,15 @@ cmake --build build-windows-arm64ec --config Release --parallel 2
 ctest --test-dir build-windows-arm64ec -C Release --output-on-failure
 ```
 
+The default build compiles the complete Windows updater in a side-effect-free
+self-test mode. A distributable build additionally requires
+`-DREVERSELAB_WINDOWS_UPDATER_SIGNER_SHA256=<64-hex-certificate-fingerprint>`;
+only then is `ReverseLabUpdater.exe` embedded and the **Updates...** button
+enabled. Build the reviewed MSI with `scripts/build-windows-installer.ps1` as
+documented in [WINDOWS_INSTALLER.md](WINDOWS_INSTALLER.md). Updater verification,
+release naming and recovery behavior are specified in
+[WINDOWS_UPDATER.md](WINDOWS_UPDATER.md).
+
 Those unsplit `ctest` commands include the interactive dialog-lifecycle suite
 and therefore assume a usable desktop session. Hosted Windows CI uses the
 non-dialog plus `WHYKIKI_PRESET_TEST_SAVE_RESTORE_ONLY=1` split described below.
@@ -80,6 +91,11 @@ helper build, keeping the helper ABI identical to the plug-in ABI.
 `./scripts/package-release.sh Release` takes a source snapshot (including initialized JUCE and local source edits), builds it from scratch, runs every CTest suite, and loads both the extracted ZIP and installer payload as real VST3s. It does not trust an existing same-version build. A complete candidate is published atomically in a new `dist/ReverseLab-VERSION-COMMIT-SOURCEHASH-BINARYHASH/` directory; existing candidates are never overwritten. The directory includes source/release manifests, test reports and SHA-256 checksums. See [the release pipeline contract](docs/RELEASE_PIPELINE.md).
 
 For a Developer-ID-signed and notarized package, set `REVERSELAB_APPLICATION_IDENTITY`, `REVERSELAB_INSTALLER_IDENTITY`, and `REVERSELAB_NOTARY_PROFILE` to the corresponding signing identities and `notarytool` keychain profile before running it. Without these identities the candidate is ad-hoc signed, its installer is unsigned, and no notarization is claimed.
+
+Direct macOS CMake builds likewise default to inside-out ad-hoc signing. Set
+`-DREVERSELAB_CODESIGN_IDENTITY="Developer ID Application: …"` only when that
+identity is actually available; the embedded updater is signed before the VST3
+root and `--deep` is used only for recursive strict verification.
 
 The currently verified local installation uses the user-level VST3 directory, which Cubase scans without administrator privileges:
 
@@ -112,7 +128,9 @@ DSP/processor, parameter-text, preset and validator tests, and exercises the
 Makefiles path under ASan/UBSan. Separate Windows jobs build x86_64 and ARM64EC
 bundles in isolated directories, verify their VST3 layout, generated manifest
 and final PE architecture, and run the real VST3 host/state/audio test both
-before and after a ZIP roundtrip. The ARM64EC job runs on a native
+before and after a ZIP roundtrip. They also validate and administratively extract
+architecture-specific WiX MSI candidates, then load the extracted payload. CI
+artifacts are visibly marked unsigned. The ARM64EC job runs on a native
 `windows-11-vs2026-arm` host; it is not an x64 cross-build. Linux tests run
 under Xvfb for the real preset UI. See `.github/workflows/ci.yml` and
 [GitHub's hosted-runner reference](https://docs.github.com/en/actions/reference/runners/github-hosted-runners).
@@ -121,16 +139,17 @@ Windows Hosted Actions do not provide a trustworthy interactive DAW desktop
 acceptance environment. CI therefore excludes the full dialog-opening preset
 suite there and runs its deterministic headless persistence subset instead.
 The automated JUCE host test proves bundle discovery, instantiation, parameter
-state recall and finite non-dry stereo rendering; it does not claim Cubase or
-REAPER scanner, editor-window, signing or installer acceptance on Windows.
+state recall and finite non-dry stereo rendering; the MSI roundtrip additionally
+proves package layout and byte identity. Neither claims Cubase/REAPER scanner,
+editor-window, production-signing or privileged installation acceptance on Windows.
 
 The real VST3 host test requires canonical setter readbacks, a fresh instance whose defaults differ from the saved fixture, and non-silent effect output on both channels. Negative controls reject ignored parameter writes, passthrough, gain/delayed dry audio and dead channels. The separate state/audio roundtrip still compares all 19 parameters and every sample without fitting or alignment.
 
-Preset tests include 39 editor-lifecycle/host-callback cases plus six macOS-only native Import/Export panel cases. The former include two real Save-As-then-Load flows: normal success must load the requested next preset, while an intervening restore must keep its newer state. Set `WHYKIKI_PRESET_TEST_NATIVE_ONLY=1` on `ReverseLabPresetTests` for the focused native suite; it requires an active desktop and rejects a non-native fallback. The test-only Cocoa bridge observes its own process, verifies panel/delegate/modal teardown, unchanged fixture files/state and a usable reopened editor. Real Cubase/REAPER window behavior remains a separate acceptance gate.
+Preset tests include 39 editor-lifecycle/host-callback cases plus six macOS-only native Import/Export panel cases. The former include two real Save-As-then-Load flows: normal success must load the requested next preset, while an intervening restore must keep its newer state. Set `WHYKIKI_PRESET_TEST_NATIVE_ONLY=1` on `ReverseLabPresetTests` for focused native execution; `WHYKIKI_PRESET_TEST_NATIVE_CASE=import-detach` selects one valid case. CTest runs all six in fresh, serial processes with independent 60-second deadlines. The test-only Cocoa bridge requires an active desktop, rejects a fallback, and verifies panel/delegate/modal teardown, unchanged fixture files/state and a usable reopened editor. Real Cubase/REAPER window behavior remains a separate acceptance gate.
 
 `WHYKIKI_PRESET_TEST_SAVE_RESTORE_ONLY=1` runs dirty-state guards and 14 deterministic persistence/control groups without opening an editor: real file-commit interleavings, same-ID/ABA restores, coherent capture, host-notification restores and bounded contention before writing. `WHYKIKI_PRESET_TEST_DIRTY_ONLY=1` runs just the dirty-state guards. Do not combine either focused mode with another. Their scheduling hooks exist only in the preset-test target, never in the VST3.
 
-`ReverseLabListenerLock` runs the genuine held-JUCE-listener-lock regression separately with a 20-second CTest timeout; the normal DSP binary also includes it. DSP, parameter-text and bundle tests have 300-second limits and the full preset test 600 seconds. A timeout fails the test.
+`ReverseLabListenerLock` runs the genuine held-JUCE-listener-lock regression separately with a 20-second CTest timeout; the normal DSP binary also includes it. DSP, parameter-text and bundle tests have 300-second limits, the non-native full preset test 600 seconds and each native panel case 60 seconds. A timeout fails the test.
 
 ## Control-thread contract
 
@@ -167,6 +186,11 @@ See [the full preset catalogue](Presets/CATALOG.md) and [the implementation and 
 
 ## Native Updates
 
-Die Schaltfläche **Updates...** prüft neue Versionen, lädt das passende Paket und
-führt durch die Installation mit dem macOS-Installer. Details, Release-Anforderungen
-und Testgrenzen stehen in [UPDATER.md](UPDATER.md).
+Die Schaltfläche **Updates...** verwendet je Plattform einen separaten nativen
+Updater; Details zum universellen macOS-Pfad stehen in [UPDATER.md](UPDATER.md).
+Windows verwendet architekturspezifische, signaturgepinnte Updater/MSI-Pakete;
+siehe [WINDOWS_UPDATER.md](WINDOWS_UPDATER.md) und
+[WINDOWS_INSTALLER.md](WINDOWS_INSTALLER.md); siehe für den manuellen
+Tag-/Signing-Ablauf zusätzlich [WINDOWS_RELEASE.md](WINDOWS_RELEASE.md). Ohne echten Zertifikatspin bleibt
+der Windows-Button deaktiviert. CI-Ausgaben sind ausdrücklich keine
+Distributionsartefakte; reale signierte Cubase-/REAPER-Abnahme bleibt offen.

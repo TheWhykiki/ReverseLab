@@ -14,14 +14,27 @@ SPEC = importlib.util.spec_from_file_location("release_pipeline", Path(__file__)
 pipeline = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(pipeline)
 
+NOTARY_ID = "00000000-0000-4000-8000-000000000001"
+DISTRIBUTION_ENV = {"REVERSELAB_APPLICATION_IDENTITY": "app",
+                    "REVERSELAB_INSTALLER_IDENTITY": "installer",
+                    "REVERSELAB_NOTARY_PROFILE": "profile"}
+
 
 class FakeTools:
     def __init__(self, fail=None, version="1.0.4", arches="arm64 x86_64", notary_status="Accepted",
-                 corrupt=None, fail_host_at=None):
+                 corrupt=None, fail_host_at=None, notary_submit_output=None, notary_log_output=None,
+                 fail_spctl_at=None):
         self.commands = []
         self.fail, self.version, self.arches = fail, version, arches
         self.notary_status = notary_status
         self.corrupt, self.fail_host_at, self.host_calls = corrupt, fail_host_at, 0
+        self.fail_spctl_at, self.spctl_calls = fail_spctl_at, 0
+        self.notary_submit_output = (json.dumps({"id": NOTARY_ID, "status": notary_status})
+                                     if notary_submit_output is None else notary_submit_output)
+        self.notary_log_output = (json.dumps(
+            {"jobId": NOTARY_ID, "status": notary_status,
+             "statusCode": 0 if notary_status == "Accepted" else 4000, "issues": []})
+            if notary_log_output is None else notary_log_output)
         self.source = self.payload = self.archived = None
 
     def __call__(self, command, *, cwd=None, capture=False):
@@ -32,7 +45,7 @@ class FakeTools:
             self.host_calls += 1
             if self.host_calls == self.fail_host_at:
                 raise subprocess.CalledProcessError(1, parts)
-        if self.fail == tool:
+        if self.fail == tool and tool != "spctl":
             raise subprocess.CalledProcessError(1, parts)
         output = ""
         if any(Path(part).name == "generate-presets.py" for part in parts[1:]):
@@ -57,8 +70,10 @@ class FakeTools:
             output = self.arches
         elif tool == "xcrun" and parts[1] == "vtool":
             output = "minos 11.0\n"
-        elif tool == "xcrun" and parts[1] == "notarytool":
-            output = json.dumps({"status": self.notary_status})
+        elif tool == "xcrun" and parts[1:3] == ["notarytool", "submit"]:
+            output = self.notary_submit_output
+        elif tool == "xcrun" and parts[1:3] == ["notarytool", "log"]:
+            output = self.notary_log_output
         elif tool == "ditto":
             if "-c" in parts:
                 self.archived = Path(parts[-2])
@@ -76,7 +91,12 @@ class FakeTools:
             shutil.copytree(self.payload, Path(parts[-1]) / "Payload")
             if self.corrupt == "payload":
                 (Path(parts[-1]) / "Payload/Library/Audio/Plug-Ins/VST3/ReverseLab.vst3/Contents/MacOS/ReverseLab").write_bytes(b"corrupt")
-        return subprocess.CompletedProcess(parts, 0, stdout=output)
+        elif tool == "spctl":
+            self.spctl_calls += 1
+            if self.fail == tool or self.spctl_calls == self.fail_spctl_at:
+                raise subprocess.CalledProcessError(3, parts, output="", stderr="assessment denied\n")
+            output = "assessment accepted\n"
+        return subprocess.CompletedProcess(parts, 0, stdout=output, stderr="")
 
 
 class ReleasePipelineTests(unittest.TestCase):
@@ -238,11 +258,147 @@ class ReleasePipelineTests(unittest.TestCase):
             self.assertPreviousPreserved()
 
     def test_notary_invalid_status_never_publishes_even_if_command_exits_zero(self):
-        with self.assertRaisesRegex(pipeline.ReleaseError, "not accepted"):
-            self.package(FakeTools(notary_status="Invalid"),
-                         {"REVERSELAB_APPLICATION_IDENTITY": "app", "REVERSELAB_INSTALLER_IDENTITY": "installer",
-                          "REVERSELAB_NOTARY_PROFILE": "profile"})
+        tools = FakeTools(notary_status="Invalid")
+        with self.assertRaisesRegex(pipeline.ReleaseError, "log did not report an accepted job"):
+            self.package(tools, DISTRIBUTION_ENV)
+        commands = [command[1:3] for command in tools.commands if Path(command[0]).name == "xcrun"]
+        self.assertIn(["notarytool", "log"], commands, "Invalid submissions must still retain Apple's full log")
+        report, = (self.root / "dist").glob("failed-run-*")
+        self.assertTrue((report / "notary-submit.json").is_file())
+        self.assertTrue((report / "notary-log.json").is_file())
         self.assertPreviousPreserved()
+
+    def test_malformed_submission_or_missing_uuid_is_retained_without_log_request(self):
+        for name, raw_submit in (("malformed", "not JSON"),
+                                 ("missing", json.dumps({"status": "Accepted"})),
+                                 ("invalid", json.dumps({"id": "not-a-uuid", "status": "Accepted"}))):
+            with self.subTest(name=name):
+                before = set((self.root / "dist").glob("failed-run-*"))
+                tools = FakeTools(notary_submit_output=raw_submit)
+                with self.assertRaises(pipeline.ReleaseError):
+                    self.package(tools, DISTRIBUTION_ENV)
+                report, = set((self.root / "dist").glob("failed-run-*")) - before
+                self.assertEqual((report / "notary-submit.json").read_text(), raw_submit)
+                self.assertFalse((report / "notary-log.json").exists())
+                self.assertFalse(any(Path(command[0]).name == "xcrun" and command[1:3] == ["notarytool", "log"]
+                                     for command in tools.commands))
+        self.assertPreviousPreserved()
+
+    def test_notarized_candidate_retains_logs_and_passes_final_gatekeeper_assessments(self):
+        tools = FakeTools()
+        candidate = self.package(tools, DISTRIBUTION_ENV)
+        commands = tools.commands
+        submit_index = next(i for i, command in enumerate(commands)
+                            if [Path(command[0]).name, *command[1:3]] == ["xcrun", "notarytool", "submit"])
+        log_index = next(i for i, command in enumerate(commands)
+                         if [Path(command[0]).name, *command[1:3]] == ["xcrun", "notarytool", "log"])
+        staple_indices = [i for i, command in enumerate(commands)
+                          if [Path(command[0]).name, *command[1:3]] == ["xcrun", "stapler", "staple"]]
+        spctl_indices = [i for i, command in enumerate(commands) if Path(command[0]).name == "spctl"]
+        self.assertLess(submit_index, log_index)
+        self.assertEqual(len(staple_indices), 2)
+        self.assertEqual(len(spctl_indices), 2)
+        self.assertLess(log_index, min(staple_indices))
+        self.assertLess(max(staple_indices), min(spctl_indices))
+
+        notary_log_command = commands[log_index]
+        self.assertEqual(notary_log_command[1:4], ["notarytool", "log", NOTARY_ID])
+        self.assertEqual(notary_log_command[4:], ["--keychain-profile", "profile"])
+        package_assessment, vst3_assessment = (commands[index] for index in spctl_indices)
+        self.assertEqual(package_assessment[1:5], ["--assess", "--type", "install", "--verbose=4"])
+        self.assertTrue(package_assessment[-1].endswith(".pkg"))
+        self.assertEqual(vst3_assessment[1:5], ["--assess", "--type", "execute", "--verbose=4"])
+        self.assertTrue(vst3_assessment[-1].endswith("zip-roundtrip/ReverseLab.vst3"))
+
+        signing = [command for command in commands
+                   if Path(command[0]).name == "codesign" and "--sign" in command]
+        verification = [command for command in commands
+                        if Path(command[0]).name == "codesign" and "--verify" in command]
+        self.assertTrue(signing)
+        self.assertTrue(verification)
+        self.assertTrue(all("--deep" not in command for command in signing))
+        self.assertTrue(all("--deep" in command and "--strict" in command for command in verification))
+
+        expected_evidence = {"notary-submit.json", "notary-log.json",
+                             "gatekeeper-package.log", "gatekeeper-vst3.log"}
+        self.assertTrue(expected_evidence.issubset({path.name for path in candidate.iterdir()}))
+        self.assertEqual((candidate / "notary-submit.json").read_text(), tools.notary_submit_output)
+        self.assertEqual((candidate / "notary-log.json").read_text(), tools.notary_log_output)
+        manifest = json.loads((candidate / "release-manifest.json").read_text())
+        self.assertEqual(manifest["notary_submission_id"], NOTARY_ID)
+        self.assertTrue({"notary_log_accepted", "gatekeeper_package", "gatekeeper_zip_vst3"}
+                        .issubset(manifest["verification"]))
+        for name in expected_evidence:
+            self.assertEqual(manifest["artifacts"][name], pipeline.file_hash(candidate / name))
+
+    def test_malformed_missing_mismatched_or_error_notary_log_never_publishes(self):
+        other_id = "00000000-0000-4000-8000-000000000002"
+        cases = {
+            "malformed": "not JSON",
+            "missing": json.dumps({"status": "Accepted", "statusCode": 0, "issues": []}),
+            "missing_issues": json.dumps({"jobId": NOTARY_ID, "status": "Accepted", "statusCode": 0}),
+            "mismatch": json.dumps({"jobId": other_id, "status": "Accepted", "statusCode": 0, "issues": []}),
+            "error": json.dumps({"jobId": NOTARY_ID, "status": "Accepted", "statusCode": 0,
+                                 "issues": [{"severity": "error", "message": "invalid signature"}]})
+        }
+        for name, raw_log in cases.items():
+            with self.subTest(name=name):
+                before = set((self.root / "dist").glob("failed-run-*"))
+                tools = FakeTools(notary_log_output=raw_log)
+                with self.assertRaises(pipeline.ReleaseError):
+                    self.package(tools, DISTRIBUTION_ENV)
+                report, = set((self.root / "dist").glob("failed-run-*")) - before
+                self.assertEqual(json.loads((report / "failure.json").read_text())["step"], "notary_log")
+                self.assertEqual((report / "notary-submit.json").read_text(), tools.notary_submit_output)
+                self.assertEqual((report / "notary-log.json").read_text(), raw_log)
+                self.assertFalse(any(Path(command[0]).name == "spctl" for command in tools.commands))
+        self.assertPreviousPreserved()
+
+    def test_notary_log_accepts_null_issues_and_non_error_issue_list(self):
+        for issues in (None, [{"severity": "warning", "message": "informational warning"}]):
+            raw = json.dumps({"jobId": NOTARY_ID, "status": "Accepted", "statusCode": 0,
+                              "issues": issues})
+            parsed = pipeline.validate_notary_log(raw, pipeline.uuid.UUID(NOTARY_ID))
+            self.assertEqual(parsed["issues"], issues)
+
+    def test_gatekeeper_failure_never_publishes_and_retains_its_output(self):
+        for invocation, step, evidence in ((1, "gatekeeper_package", "gatekeeper-package.log"),
+                                           (2, "gatekeeper_vst3", "gatekeeper-vst3.log")):
+            with self.subTest(invocation=invocation):
+                before = set((self.root / "dist").glob("failed-run-*"))
+                tools = FakeTools(fail_spctl_at=invocation)
+                with self.assertRaises(subprocess.CalledProcessError) as raised:
+                    self.package(tools, DISTRIBUTION_ENV)
+                self.assertEqual(raised.exception.returncode, 3)
+                report, = set((self.root / "dist").glob("failed-run-*")) - before
+                details = json.loads((report / "failure.json").read_text())
+                self.assertEqual((details["step"], details["tool"], details["exit_code"]), (step, "spctl", 3))
+                self.assertIn("assessment denied", (report / evidence).read_text())
+                self.assertTrue((report / "notary-submit.json").is_file())
+                self.assertTrue((report / "notary-log.json").is_file())
+        self.assertPreviousPreserved()
+
+    def test_ad_hoc_candidate_skips_distribution_only_tools_and_metadata(self):
+        tools = FakeTools()
+        candidate = self.package(tools)
+        commands = tools.commands
+        self.assertFalse(any(Path(command[0]).name == "spctl" for command in commands))
+        self.assertFalse(any(Path(command[0]).name == "xcrun" and command[1] in ("notarytool", "stapler")
+                             for command in commands))
+        self.assertFalse(any((candidate / name).exists() for name in
+                             ("notary-submit.json", "notary-log.json",
+                              "gatekeeper-package.log", "gatekeeper-vst3.log")))
+        manifest = json.loads((candidate / "release-manifest.json").read_text())
+        self.assertFalse(manifest["application_signed"])
+        self.assertFalse(manifest["installer_signed"])
+        self.assertFalse(manifest["notarized"])
+        self.assertNotIn("notary_submission_id", manifest)
+        self.assertTrue(all("gatekeeper" not in value and "notary" not in value
+                            for value in manifest["verification"]))
+        signing = [command for command in commands
+                   if Path(command[0]).name == "codesign" and "--sign" in command]
+        self.assertTrue(signing)
+        self.assertTrue(all("--deep" not in command for command in signing))
 
     def test_corrupted_zip_or_installer_payload_is_not_published(self):
         for location in ("zip", "payload"):

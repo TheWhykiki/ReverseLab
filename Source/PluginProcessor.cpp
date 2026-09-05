@@ -522,6 +522,41 @@ void ReverseLabAudioProcessor::submitControlOperation(ControlOperation operation
     int width = 900, height = 610;
     if (restoring)
     {
+        const auto parameterIndex = [](const juce::String& id) -> std::optional<size_t>
+        {
+            for (size_t i = 0; i < parameterCount; ++i)
+                if (id == rl::params::ids[i]) return i;
+            return std::nullopt;
+        };
+        const auto validValue = [this](size_t index, const juce::var& value)
+        {
+            const auto text = value.toString().trim();
+            if (text.isEmpty()) return false;
+            auto cursor = text.getCharPointer();
+            const auto parsed = juce::CharacterFunctions::readDoubleValue(cursor);
+            if (! cursor.isEmpty()) return false;
+            if (! std::isfinite(parsed)) return false;
+            const auto plain = static_cast<float>(parsed);
+            if (! std::isfinite(plain)) return false;
+            const auto& range = rangedParameters[index]->getNormalisableRange();
+            return parsed >= static_cast<double>(range.start)
+                && parsed <= static_cast<double>(range.end);
+        };
+
+        // Host project state is an external input. Validate every sound-parameter
+        // record before deriving any operation data or entering the control gate, so
+        // a corrupt state cannot partially change parameters, metadata or DSP reset.
+        for (const auto& child : operation.state)
+        {
+            const auto index = parameterIndex(child["id"].toString());
+            if (index.has_value())
+            {
+                if (! child.hasType("PARAM")
+                    || (child.hasProperty("value") && ! validValue(*index, child["value"])))
+                    return;
+            }
+        }
+
         for (size_t i = 0; i < parameterCount; ++i)
             updates[i] = rangedParameters[i]->getDefaultValue();
         operation.program = juce::jlimit(0, getNumPrograms() - 1,
@@ -582,7 +617,14 @@ void ReverseLabAudioProcessor::submitControlOperation(ControlOperation operation
 float ReverseLabAudioProcessor::readParameter(rl::params::Index index) const noexcept
 {
     const auto* parameter = rangedParameters[static_cast<size_t>(index)];
-    return parameter->convertFrom0to1(parameter->getValue());
+    const auto fallback = parameter->convertFrom0to1(parameter->getDefaultValue());
+    const auto normalised = parameter->getValue();
+    if (! std::isfinite(normalised) || normalised < 0.0f || normalised > 1.0f)
+        return fallback;
+    const auto plain = parameter->convertFrom0to1(normalised);
+    const auto& range = parameter->getNormalisableRange();
+    return std::isfinite(plain) && plain >= range.start && plain <= range.end
+        ? plain : fallback;
 }
 
 void ReverseLabAudioProcessor::refreshRuntimeState() noexcept
@@ -669,7 +711,8 @@ void ReverseLabAudioProcessor::getStateInformation(juce::MemoryBlock& destinatio
         presets.appendSelection(selection);
     }
     auto state = extensions.createCopy();
-    state.removeChild(state.getChildWithName("WkPresetSelection"), nullptr);
+    for (int child = state.getNumChildren(); --child >= 0;)
+        if (state.getChild(child).hasType("WkPresetSelection")) state.removeChild(child, nullptr);
     if (const auto selected = selection.getChildWithName("WkPresetSelection"); selected.isValid())
         state.addChild(selected.createCopy(), -1, nullptr);
     for (size_t i = 0; i < parameterCount; ++i)

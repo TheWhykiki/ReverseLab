@@ -1,17 +1,67 @@
 cmake_minimum_required(VERSION 3.25)
+if(CMAKE_HOST_APPLE)
+    # These cache initialisers must precede project(), because CMake uses them while
+    # selecting and checking the Apple compiler toolchain. They are Apple-only; Visual
+    # Studio selects each Windows architecture independently with -A.
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "Minimum macOS version" FORCE)
+    set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64" CACHE STRING "Universal macOS build" FORCE)
+endif()
 project(ReverseLab VERSION 1.1.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-if(APPLE)
-    # The shipped product is a universal macOS VST3 with a macOS 11 floor. Other platforms are
-    # only used to compile and run the DSP/processor test suite (e.g. in CI), so keep these
-    # Apple-only instead of forcing them unconditionally, which breaks configuration elsewhere.
-    set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "Minimum macOS version" FORCE)
-    set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64" CACHE STRING "Universal macOS build" FORCE)
-endif()
 
 add_subdirectory(external/JUCE)
+
+if(WIN32)
+    # JUCE 8.0.15 calls these x86_64 and arm64ec internally and places the
+    # binaries in the matching VST3 bundle folders. ARM64EC is intentional for
+    # Windows-on-Arm hosts such as Cubase; a plain ARM64 build uses a different
+    # bundle ABI/folder and is not the Windows-on-Arm product target we validate.
+    set(REVERSELAB_SUPPORTED_WINDOWS_ARCHITECTURES x86_64 arm64ec)
+    if(NOT JUCE_TARGET_ARCHITECTURE IN_LIST REVERSELAB_SUPPORTED_WINDOWS_ARCHITECTURES)
+        message(FATAL_ERROR
+            "Unsupported ReverseLab Windows architecture '${JUCE_TARGET_ARCHITECTURE}'. "
+            "Configure Visual Studio with -A x64 or -A ARM64EC.")
+    endif()
+
+    # Reject a manually overridden or stale JUCE architecture cache instead of
+    # putting one PE architecture into another architecture's VST3 folder.
+    if(CMAKE_GENERATOR MATCHES "^Visual Studio ")
+        if(JUCE_TARGET_ARCHITECTURE STREQUAL "x86_64")
+            set(REVERSELAB_EXPECTED_VISUAL_STUDIO_PLATFORM x64)
+        else()
+            set(REVERSELAB_EXPECTED_VISUAL_STUDIO_PLATFORM ARM64EC)
+        endif()
+        if(NOT CMAKE_GENERATOR_PLATFORM STREQUAL REVERSELAB_EXPECTED_VISUAL_STUDIO_PLATFORM)
+            message(FATAL_ERROR
+                "Visual Studio platform '${CMAKE_GENERATOR_PLATFORM}' does not match JUCE's "
+                "detected architecture '${JUCE_TARGET_ARCHITECTURE}'. Use a fresh build directory "
+                "with -A ${REVERSELAB_EXPECTED_VISUAL_STUDIO_PLATFORM}.")
+        endif()
+    endif()
+
+    # ARM64EC is a supported product only when its target helpers and host test
+    # can execute on the build machine. This rejects an x64-to-ARM64EC
+    # cross-build instead of presenting compile-only evidence as validation.
+    if(JUCE_TARGET_ARCHITECTURE STREQUAL "arm64ec")
+        if(NOT CMAKE_GENERATOR MATCHES "^Visual Studio ")
+            message(FATAL_ERROR "ReverseLab ARM64EC builds require a Visual Studio generator.")
+        endif()
+        string(TOLOWER "${CMAKE_HOST_SYSTEM_PROCESSOR}" REVERSELAB_WINDOWS_HOST_ARCHITECTURE)
+        if(NOT REVERSELAB_WINDOWS_HOST_ARCHITECTURE MATCHES "^(arm64|arm64ec|aarch64)$"
+           OR NOT JUCE_WINDOWS_HELPERS_CAN_RUN)
+            message(FATAL_ERROR
+                "ReverseLab ARM64EC builds require native Windows on Arm so the VST3 manifest "
+                "helper and host test can run. Configure this target on an Arm64 runner.")
+        endif()
+    endif()
+endif()
+
+# JUCE 8.0.15 omits Visual Studio's -A value from its nested VST3 manifest-helper
+# configure. The pinned, repo-local override forwards x64 or ARM64EC without
+# modifying the JUCE submodule.
+include(cmake/JuceVST3ManifestHelperPlatform.cmake)
 
 juce_add_plugin(ReverseLab
     VERSION ${PROJECT_VERSION}
@@ -52,7 +102,8 @@ if(APPLE)
     # the generated metadata is covered by the final resource seal for every CMake generator.
     find_program(REVERSELAB_CODESIGN_EXECUTABLE codesign REQUIRED)
     add_custom_command(TARGET ReverseLab_VST3 POST_BUILD
-        COMMAND "${REVERSELAB_CODESIGN_EXECUTABLE}" --force --deep --sign - "$<TARGET_BUNDLE_DIR:ReverseLab_VST3>"
+        COMMAND "${REVERSELAB_CODESIGN_EXECUTABLE}" --force --sign - "$<TARGET_BUNDLE_DIR:ReverseLab_VST3>"
+        COMMAND "${REVERSELAB_CODESIGN_EXECUTABLE}" --verify --deep --strict --verbose=2 "$<TARGET_BUNDLE_DIR:ReverseLab_VST3>"
         COMMENT "Signing completed ReverseLab VST3 bundle"
         VERBATIM)
 endif()
@@ -91,7 +142,7 @@ target_link_libraries(ReverseLabParameterTextTests PRIVATE juce::juce_audio_proc
 add_test(NAME ReverseLabParameterTextRoundtrip COMMAND ReverseLabParameterTextTests)
 set_tests_properties(ReverseLabParameterTextRoundtrip PROPERTIES TIMEOUT 300)
 
-if(APPLE)
+if(APPLE OR WIN32)
     juce_add_console_app(ReverseLabHostTests PRODUCT_NAME "ReverseLab VST3 Host Tests")
     target_sources(ReverseLabHostTests PRIVATE Tests/HostTest.cpp)
     target_compile_definitions(ReverseLabHostTests PRIVATE
@@ -100,15 +151,23 @@ if(APPLE)
         PUBLIC juce::juce_recommended_config_flags juce::juce_recommended_warning_flags)
     add_dependencies(ReverseLabHostTests ReverseLab_VST3)
     add_test(NAME ReverseLabBundleLoad COMMAND ReverseLabHostTests
-        "${CMAKE_BINARY_DIR}/ReverseLab_artefacts/$<CONFIG>/VST3/ReverseLab.vst3")
+        "$<GENEX_EVAL:$<TARGET_PROPERTY:ReverseLab_VST3,JUCE_PLUGIN_ARTEFACT_FILE>>")
     set_tests_properties(ReverseLabBundleLoad PROPERTIES TIMEOUT 300)
 endif()
 
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
-add_test(NAME ReverseLabReleasePipeline COMMAND "${Python3_EXECUTABLE}" -B -m unittest discover
-    -s "${CMAKE_CURRENT_SOURCE_DIR}/scripts/tests" -p "test_release_pipeline.py")
-add_test(NAME ReverseLabLocalInstaller COMMAND "${Python3_EXECUTABLE}" -B -m unittest discover
-    -s "${CMAKE_CURRENT_SOURCE_DIR}/scripts/tests" -p "test_install_local.py")
+add_test(NAME ReverseLabBuildPortability COMMAND "${Python3_EXECUTABLE}" -B -m unittest discover
+    -s "${CMAKE_CURRENT_SOURCE_DIR}/scripts/tests" -p "test_build_portability.py")
+# These harnesses exercise macOS release/install scripts with POSIX permissions,
+# signals, symlinks and /bin/bash. Their fake-tool tests are useful on macOS and
+# Linux, but registering them on Windows would be a platform error rather than a
+# product regression.
+if(NOT WIN32)
+    add_test(NAME ReverseLabReleasePipeline COMMAND "${Python3_EXECUTABLE}" -B -m unittest discover
+        -s "${CMAKE_CURRENT_SOURCE_DIR}/scripts/tests" -p "test_release_pipeline.py")
+    add_test(NAME ReverseLabLocalInstaller COMMAND "${Python3_EXECUTABLE}" -B -m unittest discover
+        -s "${CMAKE_CURRENT_SOURCE_DIR}/scripts/tests" -p "test_install_local.py")
+endif()
 add_test(NAME ReverseLabAcceptanceValidators COMMAND "${Python3_EXECUTABLE}" -B -m unittest -v test_analyse_host_audio)
 set_tests_properties(ReverseLabAcceptanceValidators PROPERTIES
     WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/scripts/acceptance")

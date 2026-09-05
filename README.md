@@ -1,14 +1,25 @@
 # ReverseLab 1.1.0 (development)
 
-ReverseLab is a tempo-synchronised stereo reverse effect for Cubase on macOS.
+ReverseLab is a tempo-synchronised stereo reverse VST3 effect for macOS and Windows.
 
 Copyright © 2026 Whykiki Audio. ReverseLab is free software licensed under the GNU Affero General Public License v3.0; see [LICENSE](LICENSE). JUCE remains available under its own dual-licensing terms.
 
-## Download and install
+Any distributed binary must remain traceable to its exact corresponding source.
+Tag the release commit, keep the source tag publicly available, and record that tag
+and commit alongside the binary checksums. A local candidate directory or an
+untagged branch head is not, by itself, the corresponding-source record for a
+public release.
+
+## Download and install (current macOS release)
 
 The 1.1.0 source includes acceptance fixes that may not yet be in the latest downloadable release. In particular, earlier builds could sustain excessive feedback after input stopped when crossfade was enabled. Check the downloaded version; the earlier smoke-test results below do not certify this corrected source or every feedback setting.
 
 Download the current `.pkg` from [GitHub Releases](https://github.com/TheWhykiki/ReverseLab/releases/latest), open it, and follow the installer. It installs the universal VST3 into `/Library/Audio/Plug-Ins/VST3`. Restart Cubase or trigger a plug-in rescan afterwards.
+
+The published installer described here is macOS-only. Windows x86_64 and
+Windows-on-Arm builds are covered by the source and CI configuration below, but
+there is not yet a signed Windows installer or a documented Windows DAW
+acceptance result in this repository.
 
 The VST3 inside the current release is ad-hoc signed, but the `.pkg` itself is unsigned and the release is not Apple-notarized. Gatekeeper will therefore block the installer on first launch. Open it once, then go to **System Settings → Privacy & Security** and choose **Open Anyway**. Alternatively unzip the raw VST3 from the release, copy it to `~/Library/Audio/Plug-Ins/VST3`, and remove its quarantine flag with `xattr -dr com.apple.quarantine ~/Library/Audio/Plug-Ins/VST3/ReverseLab.vst3`. The release also includes SHA-256 checksums.
 
@@ -22,13 +33,49 @@ cmake --build build --config Release
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-The project builds a universal `arm64`/`x86_64` VST3. Install it only after tests pass:
+On macOS the project builds one universal `arm64`/`x86_64` VST3 with a macOS
+11.0 deployment target in both slices. Install it only after tests pass:
 
 ```sh
 ./scripts/install-local.sh Release
 ```
 
 The local installer requires Python 3.9 or newer. It verifies the built bundle without re-signing or changing it, stages a fresh copy and verifies the installed bytes and signature. An existing installation is moved to a uniquely named backup; its exact path is printed on success. Failed installation attempts restore the previous bundle where possible and retain diagnostic staging/backup paths instead of deleting recovery data. It never merges new files into an old bundle. A pre-existing installer lock is reported for manual inspection, not removed automatically. Close plug-in hosts before replacing a loaded bundle.
+
+Windows uses separate PE binaries rather than one universal binary. Configure
+and test each architecture in its own build directory:
+
+```powershell
+# Windows x86_64 (Visual Studio 2022)
+cmake -S . -B build-windows-x86_64 -G "Visual Studio 17 2022" -A x64
+cmake --build build-windows-x86_64 --config Release --parallel 2
+ctest --test-dir build-windows-x86_64 -C Release --output-on-failure
+
+# Windows on Arm (Visual Studio 2026 with ARM64EC tools)
+cmake -S . -B build-windows-arm64ec -G "Visual Studio 18 2026" -A ARM64EC
+cmake --build build-windows-arm64ec --config Release --parallel 2
+ctest --test-dir build-windows-arm64ec -C Release --output-on-failure
+```
+
+Those unsplit `ctest` commands include the interactive dialog-lifecycle suite
+and therefore assume a usable desktop session. Hosted Windows CI uses the
+non-dialog plus `WHYKIKI_PRESET_TEST_SAVE_RESTORE_ONLY=1` split described below.
+
+The supported Windows-on-Arm format is ARM64EC. JUCE 8.0.15 places these
+binaries in `Contents/arm64ec-win`; x86_64 uses `Contents/x86_64-win`. Do not
+substitute `-A ARM64`: that produces the distinct `arm64-win` VST3 layout and
+does not satisfy ReverseLab's Cubase/Windows-on-Arm compatibility target.
+[Microsoft documents the ARM64EC toolchain and ABI](https://learn.microsoft.com/en-us/windows/arm/arm64ec-build).
+The [Visual Studio 2026 generator](https://cmake.org/cmake/help/latest/generator/Visual%20Studio%2018%202026.html)
+requires CMake 4.2 or newer; the native CI runner supplies a current CMake
+release and the ARM64EC C++ components.
+
+ARM64EC builds are accepted only on native Windows on Arm, where the generated
+`moduleinfo.json` helper and VST3 host test can both execute; an x64-to-ARM64EC
+cross-build is rejected at configure time. The CI job uses GitHub's native
+Windows Arm64 hosted runner. A repo-local, JUCE-8.0.15-pinned CMake override
+forwards the outer `-A x64` or `-A ARM64EC` setting to JUCE's nested manifest
+helper build, keeping the helper ABI identical to the plug-in ABI.
 
 `./scripts/package-release.sh Release` takes a source snapshot (including initialized JUCE and local source edits), builds it from scratch, runs every CTest suite, and loads both the extracted ZIP and installer payload as real VST3s. It does not trust an existing same-version build. A complete candidate is published atomically in a new `dist/ReverseLab-VERSION-COMMIT-SOURCEHASH-BINARYHASH/` directory; existing candidates are never overwritten. The directory includes source/release manifests, test reports and SHA-256 checksums. See [the release pipeline contract](docs/RELEASE_PIPELINE.md).
 
@@ -56,7 +103,26 @@ Once Freeze has captured its initial window, changing length or tempo does not r
 
 ## Continuous integration
 
-Every main-branch push and pull request builds and strictly verifies the universal VST3 and its ZIP roundtrip on macOS, runs DSP/processor, parameter-text, preset and validator tests, and exercises the Makefiles path under ASan/UBSan. The extracted VST3 is instantiated and rendered with samplewise finite checks and parameter/audio state recall. Linux tests run under Xvfb for the real preset UI. See `.github/workflows/ci.yml`.
+Every main-branch push and pull request builds and strictly verifies the
+universal VST3 and its ZIP roundtrip in isolated jobs on both a native
+`macos-15` Arm64 runner and a native `macos-15-intel` x86_64 runner. Each job
+verifies both slices and the macOS 11.0 deployment target, then runs the real
+host/state/audio render on its native slice. The workflow also runs
+DSP/processor, parameter-text, preset and validator tests, and exercises the
+Makefiles path under ASan/UBSan. Separate Windows jobs build x86_64 and ARM64EC
+bundles in isolated directories, verify their VST3 layout, generated manifest
+and final PE architecture, and run the real VST3 host/state/audio test both
+before and after a ZIP roundtrip. The ARM64EC job runs on a native
+`windows-11-vs2026-arm` host; it is not an x64 cross-build. Linux tests run
+under Xvfb for the real preset UI. See `.github/workflows/ci.yml` and
+[GitHub's hosted-runner reference](https://docs.github.com/en/actions/reference/runners/github-hosted-runners).
+
+Windows Hosted Actions do not provide a trustworthy interactive DAW desktop
+acceptance environment. CI therefore excludes the full dialog-opening preset
+suite there and runs its deterministic headless persistence subset instead.
+The automated JUCE host test proves bundle discovery, instantiation, parameter
+state recall and finite non-dry stereo rendering; it does not claim Cubase or
+REAPER scanner, editor-window, signing or installer acceptance on Windows.
 
 The real VST3 host test requires canonical setter readbacks, a fresh instance whose defaults differ from the saved fixture, and non-silent effect output on both channels. Negative controls reject ignored parameter writes, passthrough, gain/delayed dry audio and dead channels. The separate state/audio roundtrip still compares all 19 parameters and every sample without fitting or alignment.
 
@@ -76,7 +142,7 @@ Program requests made off the message thread retain their deferred, coalesced ne
 
 The additional overlapping JUCE-control-thread tests do not change VST3's UI-thread state-access contract and do not replace actual Cubase/REAPER acceptance. Arbitrary cross-thread waits inside external JUCE listeners can still create their own lock cycles.
 
-## Earlier release validation (1.0.4)
+## Earlier macOS release validation (1.0.4)
 
 - JUCE 8.0.15, VST3 SDK 3.8
 - Universal `arm64` and `x86_64`

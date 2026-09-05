@@ -2,12 +2,23 @@
 
 Run `./scripts/package-release.sh Release` from a macOS checkout with initialized JUCE, CMake, Python 3 and the Xcode command-line tools. `REVERSELAB_BUILD_JOBS` defaults to 2. The full rebuild is intentional.
 
+This script is deliberately the macOS distribution pipeline; it does not package
+or sign Windows releases. Windows CI creates separate unsigned VST3 ZIP artifacts
+for x86_64 (`Contents/x86_64-win`) and Windows on Arm using ARM64EC
+(`Contents/arm64ec-win`). Both CI jobs run the JUCE VST3 host/state/audio test on
+their native architecture and repeat it after extracting the ZIP. Those checks
+are build and generic-host evidence only: a signed Windows installer plus actual
+Cubase/REAPER scanning, editor and audio acceptance remain future release gates.
+An x64-to-ARM64EC cross-build cannot execute JUCE's target helper or host test,
+so ReverseLab rejects it at configure time rather than presenting it as
+equivalent to the native ARM64EC CI result.
+
 1. Validate configuration, version and paired signing identities before packaging. An explicit version must match CMake.
-2. Snapshot tracked file bytes and new Source/Tests/scripts/Presets/Resources/Assets inputs, including the actual initialized submodule contents. Record commits, dirty status, modes and SHA-256 hashes. Reject a changing snapshot or source symlinks.
+2. Snapshot tracked file bytes and new inputs under `Source`, `Tests`, `scripts`, `cmake`, `.github`, `Presets`, `Resources` and `Assets`, including the actual initialized submodule contents. Record commits, dirty status, modes and SHA-256 hashes. Reject a changing snapshot or source symlinks.
 3. Require `generate-presets.py --check` to pass against the snapshot before compiling: authored JSON recipes must match the compiled factory-bank header. Build the snapshot in a temporary directory under ignored `dist`. Build every target and require all registered tests to pass; keep JUnit and CTest logs.
-4. Check version, executable permissions, both arm64/x86_64 slices, macOS 11.0 deployment targets and strict signatures. Sign the staged candidate using the provided application identity, or explicitly ad hoc.
-5. Build the installer. If a notary profile is provided, require an Accepted response and validate stapled tickets. No external notarization is attempted without the supplied identities/profile.
-6. Extract the ZIP and installer payload independently, verify each binary hash/signature, and actually instantiate/render/restore each VST3 through the host test.
+4. Check version, executable permissions, both arm64/x86_64 slices, macOS 11.0 deployment targets and strict signatures. Sign the current root bundle explicitly (without recursive `--deep` signing), then perform recursive strict verification. A future nested helper must be signed inside-out before the root bundle. Sign the staged candidate using the provided application identity, or explicitly ad hoc.
+5. Build the installer. If a notary profile is provided, retain the raw submission and full Apple log, require matching job UUIDs plus an Accepted/zero-status log with no error issues, and validate both stapled tickets. No external notarization is attempted without the supplied identities/profile.
+6. Extract the ZIP and installer payload independently, verify each binary hash/signature, and actually instantiate/render/restore each VST3 through the host test. A notarized run additionally requires `spctl` to accept the final stapled package and the VST3 restored from the final ZIP; both assessment logs become checksummed release artifacts.
 7. Publish the completed artifact directory with an atomic same-filesystem rename under a publication lock. Never erase or replace earlier candidates. Write source/release manifests and checksums covering the artifacts and test reports.
 
 Pipeline unit tests inject stale factory recipes, build, test, signing, packaging, corruption, host-loading and publication failures. The recipe check runs the actual generator on staged fixtures; macOS tools are faked. These are safety checks, not evidence of actual Apple notarization. A real local candidate run is a separate check.
@@ -18,4 +29,9 @@ The VST3 host test uses legal parameter values obtained through the plugin's own
 
 Before recording the state, the test requires readbacks to match those canonical requests. A newly created default instance must differ from the saved fixture before restore. Both output channels must contain signal and effective wet processing: independent negative controls reject immediate passthrough, gain/delayed dry signals and either dead channel. The sine/cosine projection used only to detect dry output never fits, aligns or changes the separate before/after recall comparison or its tolerance.
 
-Local ad-hoc success is not public-distribution clearance. Developer-ID signing, actual notarization, installation on another Mac and subjective listening remain independent release gates. Creating a local candidate does not publish a GitHub Release or install anything.
+Local ad-hoc success is not public-distribution clearance. Developer-ID signing,
+actual notarization, installation on another Mac and subjective listening remain
+independent release gates. A public AGPL release must also tag and retain the exact
+corresponding source identified by the candidate manifest. Creating a local
+candidate does not publish a GitHub Release, create a source tag, or install
+anything.

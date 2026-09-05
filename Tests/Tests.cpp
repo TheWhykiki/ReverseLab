@@ -197,7 +197,7 @@ void makeCustomState(ReverseLabAudioProcessor& processor, int program, bool alte
     for (const auto& [id, ignored] : factoryBank().front().values)
     {
         juce::ignoreUnused(ignored);
-        juce::ValueTree parameter("PARAM");
+        juce::ValueTree parameter("VALUE");
         parameter.setProperty("id", id, nullptr);
         parameter.setProperty("value", processor.parameters.getRawParameterValue(id)->load(), nullptr);
         selection.addChild(parameter, -1, nullptr);
@@ -502,6 +502,118 @@ public:
         ReverseLabAudioProcessor unprepared;
         expect(std::isfinite(unprepared.getTailLengthSeconds()));
         expect(unprepared.getTailLengthSeconds() > 0.0);
+
+        beginTest("Non-finite and out-of-range normalized host writes cannot poison tail or engine conversion");
+        {
+            struct InvalidNormalised { const char* name; float value; };
+            const std::array invalidValues {
+                InvalidNormalised { "NaN", std::numeric_limits<float>::quiet_NaN() },
+                InvalidNormalised { "+Inf", std::numeric_limits<float>::infinity() },
+                InvalidNormalised { "-Inf", -std::numeric_limits<float>::infinity() },
+                InvalidNormalised { "below zero", -0.01f },
+                InvalidNormalised { "above one", 1.01f }
+            };
+            const auto configure = [](ReverseLabAudioProcessor& subject)
+            {
+                setParameter(subject, rl::params::sync, 0.0f);
+                setParameter(subject, rl::params::link, 1.0f);
+                setParameter(subject, rl::params::leftFreeMs, 20.0f);
+                setParameter(subject, rl::params::rightFreeMs, 20.0f);
+                setParameter(subject, rl::params::speed, 1.0f);
+                setParameter(subject, rl::params::mix, 100.0f);
+                setParameter(subject, rl::params::feedback, 0.0f);
+                setParameter(subject, rl::params::random, 0.0f);
+                setParameter(subject, rl::params::stereoOffset, 0.0f);
+                setParameter(subject, rl::params::bypass, 0.0f);
+            };
+            for (const auto& invalid : invalidValues)
+            {
+                ReverseLabAudioProcessor subject, reference;
+                configure(subject);
+                configure(reference);
+                subject.prepareToPlay(48000.0, 64);
+                reference.prepareToPlay(48000.0, 64);
+
+                int position = 0;
+                float maximumDifference = 0.0f;
+                bool finite = true;
+                double comparedEnergy = 0.0;
+                const auto renderPair = [&](int blocks, bool compare)
+                {
+                    juce::MidiBuffer midi;
+                    for (int blockIndex = 0; blockIndex < blocks; ++blockIndex)
+                    {
+                        juce::AudioBuffer<float> actual(2, 64), expected(2, 64);
+                        for (int sample = 0; sample < 64; ++sample)
+                            for (int channel = 0; channel < 2; ++channel)
+                            {
+                                const auto input = 0.2f * std::sin(static_cast<float>(position + sample)
+                                                                   * (channel == 0 ? 0.071f : 0.113f));
+                                actual.setSample(channel, sample, input);
+                                expected.setSample(channel, sample, input);
+                            }
+                        subject.processBlock(actual, midi);
+                        reference.processBlock(expected, midi);
+                        if (compare)
+                            for (int sample = 0; sample < 64; ++sample)
+                                for (int channel = 0; channel < 2; ++channel)
+                                {
+                                    const auto a = actual.getSample(channel, sample);
+                                    const auto b = expected.getSample(channel, sample);
+                                    finite = finite && std::isfinite(a) && std::isfinite(b);
+                                    maximumDifference = juce::jmax(maximumDifference, std::abs(a - b));
+                                    comparedEnergy += static_cast<double>(b) * static_cast<double>(b);
+                                }
+                        position += 64;
+                    }
+                };
+
+                renderPair(48, false); // Ensure the next speed read reaches active reverse playback.
+                auto* speed = subject.parameters.getParameter(rl::params::speed);
+                speed->setValue(invalid.value); // Models a malformed normalised host-automation write.
+                const auto stored = speed->getValue();
+                const auto storedIsInvalid = ! std::isfinite(stored) || stored < 0.0f || stored > 1.0f;
+                if (std::isnan(invalid.value))
+                    expect(storedIsInvalid, "NaN must exercise readParameter's fallback instead of a JUCE endpoint clamp");
+                else
+                    expect(! storedIsInvalid,
+                           juce::String(invalid.name) + " is expected to be clipped by the standard JUCE float parameter");
+                reference.parameters.getParameter(rl::params::speed)->setValue(
+                    storedIsInvalid ? speed->getDefaultValue() : stored);
+                const auto subjectTail = subject.getTailLengthSeconds();
+                const auto referenceTail = reference.getTailLengthSeconds();
+                expect(std::isfinite(subjectTail) && subjectTail > 0.0,
+                       juce::String(invalid.name) + " must not poison the host tail query");
+                expectWithinAbsoluteError(subjectTail, referenceTail, 0.0,
+                                          juce::String(invalid.name) + " must use the default or JUCE's legal clipped endpoint");
+                renderPair(8, true);
+                expect(finite, juce::String(invalid.name) + " must not reach the engine as a non-finite position");
+                expectGreaterThan(comparedEnergy, 0.01, juce::String(invalid.name) + " must exercise audible reverse DSP");
+                expectWithinAbsoluteError(maximumDifference, 0.0f, 0.0f,
+                                          juce::String(invalid.name) + " must render exactly like the default-speed reference");
+            }
+        }
+
+        beginTest("Legal normalized host automation remains effective");
+        {
+            ReverseLabAudioProcessor legal, reference;
+            for (auto* subject : { &legal, &reference })
+            {
+                setParameter(*subject, rl::params::sync, 0.0f);
+                setParameter(*subject, rl::params::link, 1.0f);
+                setParameter(*subject, rl::params::leftFreeMs, 20.0f);
+                setParameter(*subject, rl::params::mix, 100.0f);
+                setParameter(*subject, rl::params::feedback, 0.0f);
+            }
+            legal.parameters.getParameter(rl::params::speed)->setValue(1.0f); // legal normalised maximum = 4x
+            const auto saved = stateTree(snapshot(legal));
+            expectWithinAbsoluteError(static_cast<float>(saved.getChildWithProperty("id", rl::params::speed)["value"]),
+                                      4.0f, 0.0f, "A legal host value must not fall back to the 1x default");
+            legal.prepareToPlay(48000.0, 64);
+            reference.prepareToPlay(48000.0, 64);
+            expect(legal.getTailLengthSeconds() > reference.getTailLengthSeconds(),
+                   "The safe tail path must retain valid 4x speed automation");
+        }
 
         beginTest("Free timing is continuous and determines reported latency");
         ReverseLabAudioProcessor processor;
@@ -1849,6 +1961,126 @@ public:
                    "The committed restore remains intact and all APVTS caches converge after the old notification returns");
         }
 
+        beginTest("Malformed parameter records are rejected atomically before DSP state changes");
+        {
+            ReverseLabAudioProcessor baselineSource(root.getChildFile("invalid-state-source"));
+            makeCustomState(baselineSource, 2, false);
+            setParameter(baselineSource, rl::params::sync, 0.0f);
+            setParameter(baselineSource, rl::params::link, 1.0f);
+            setParameter(baselineSource, rl::params::leftFreeMs, 20.0f);
+            setParameter(baselineSource, rl::params::rightFreeMs, 20.0f);
+            setParameter(baselineSource, rl::params::speed, 1.0f);
+            setParameter(baselineSource, rl::params::mix, 100.0f);
+            setParameter(baselineSource, rl::params::feedback, 0.0f);
+            setParameter(baselineSource, rl::params::random, 0.0f);
+            setParameter(baselineSource, rl::params::stereoOffset, 0.0f);
+            setParameter(baselineSource, rl::params::bypass, 0.0f);
+            const auto baseline = snapshot(baselineSource);
+
+            const auto withValue = [&](const char* id, const char* text)
+            {
+                auto tree = stateTree(baseline);
+                // Every malformed fixture also carries valid-but-different control
+                // metadata, so rejection cannot pass after a partial program,
+                // editor-size or selection commit.
+                tree.setProperty("program", 1, nullptr);
+                tree.setProperty("editorWidth", 1180, nullptr);
+                tree.setProperty("editorHeight", 780, nullptr);
+                if (auto selection = tree.getChildWithName("WkPresetSelection"); selection.isValid())
+                    selection.setProperty("name", "Must Not Commit", nullptr);
+                auto parameter = tree.getChildWithProperty("id", id);
+                expect(parameter.isValid(), "The negative-state fixture must address an existing parameter");
+                parameter.setProperty("value", juce::String(text), nullptr);
+                juce::MemoryBlock result;
+                if (auto xml = tree.createXml()) juce::AudioProcessor::copyXmlToBinary(*xml, result);
+                return result;
+            };
+            struct InvalidState { juce::String name; juce::MemoryBlock bytes; };
+            std::vector<InvalidState> invalidStates;
+            invalidStates.push_back({ "NaN speed", withValue(rl::params::speed, "nan") });
+            invalidStates.push_back({ "+Inf feedback", withValue(rl::params::feedback, "inf") });
+            invalidStates.push_back({ "-Inf mix", withValue(rl::params::mix, "-inf") });
+            invalidStates.push_back({ "non-numeric mix", withValue(rl::params::mix, "not-a-number") });
+            invalidStates.push_back({ "below-range free time", withValue(rl::params::leftFreeMs, "19.9") });
+            invalidStates.push_back({ "above-range free time", withValue(rl::params::leftFreeMs, "4000.1") });
+            {
+                auto tree = stateTree(baseline);
+                tree.setProperty("program", 1, nullptr);
+                tree.setProperty("editorWidth", 1180, nullptr);
+                tree.setProperty("editorHeight", 780, nullptr);
+                juce::ValueTree masqueradingExtension("Future");
+                masqueradingExtension.setProperty("id", rl::params::output, nullptr);
+                masqueradingExtension.setProperty("value", -6.0, nullptr);
+                tree.addChild(masqueradingExtension, -1, nullptr);
+                juce::MemoryBlock bytes;
+                if (auto xml = tree.createXml()) juce::AudioProcessor::copyXmlToBinary(*xml, bytes);
+                invalidStates.push_back({ "non-PARAM child with a known parameter ID", std::move(bytes) });
+            }
+
+            for (size_t caseIndex = 0; caseIndex < invalidStates.size(); ++caseIndex)
+            {
+                const auto& invalid = invalidStates[caseIndex];
+                ReverseLabAudioProcessor processor(root.getChildFile("invalid-state-subject-" + juce::String(caseIndex)));
+                ReverseLabAudioProcessor reference(root.getChildFile("invalid-state-reference-" + juce::String(caseIndex)));
+                restore(processor, baseline);
+                restore(reference, baseline);
+                processor.prepareToPlay(48000.0, 64);
+                reference.prepareToPlay(48000.0, 64);
+
+                int position = 0;
+                float maximumDifference = 0.0f;
+                bool finite = true;
+                double comparedEnergy = 0.0;
+                const auto renderPair = [&](int blocks, bool measureEnergy)
+                {
+                    juce::MidiBuffer midi;
+                    for (int blockIndex = 0; blockIndex < blocks; ++blockIndex)
+                    {
+                        juce::AudioBuffer<float> actual(2, 64), expected(2, 64);
+                        for (int sample = 0; sample < 64; ++sample)
+                            for (int channel = 0; channel < 2; ++channel)
+                            {
+                                const auto value = 0.2f * std::sin(static_cast<float>(position + sample)
+                                                                  * (channel == 0 ? 0.071f : 0.113f));
+                                actual.setSample(channel, sample, value);
+                                expected.setSample(channel, sample, value);
+                            }
+                        processor.processBlock(actual, midi);
+                        reference.processBlock(expected, midi);
+                        for (int sample = 0; sample < 64; ++sample)
+                            for (int channel = 0; channel < 2; ++channel)
+                            {
+                                const auto a = actual.getSample(channel, sample);
+                                const auto b = expected.getSample(channel, sample);
+                                finite = finite && std::isfinite(a) && std::isfinite(b);
+                                maximumDifference = juce::jmax(maximumDifference, std::abs(a - b));
+                                if (measureEnergy) comparedEnergy += static_cast<double>(b) * static_cast<double>(b);
+                            }
+                        position += 64;
+                    }
+                };
+
+                renderPair(48, false); // Populate real reverse history before attempting the rejected restore.
+                const auto before = snapshot(processor);
+                const auto notificationsPendingBefore = processor.hasPendingStateNotificationsForTesting();
+                restore(processor, invalid.bytes);
+                const auto after = snapshot(processor);
+                const auto rejected = sameCompleteState(processor, after, before)
+                                   && liveStateMatches(processor, before)
+                                   && processor.hasPendingStateNotificationsForTesting() == notificationsPendingBefore;
+                expect(rejected, invalid.name + " must leave all parameters, program, editor, selection and notifications unchanged");
+
+                // In particular, a NaN speed must never reach ReverseEngine::readInterpolated(),
+                // where the read position is converted to an integer. Rendering also proves that
+                // a rejected state did not publish a hidden DSP-reset generation.
+                if (rejected) renderPair(8, true);
+                expect(finite, invalid.name + " must not produce a non-finite audio sample");
+                expectGreaterThan(comparedEnergy, 0.01, invalid.name + " must exercise audible running DSP");
+                expectWithinAbsoluteError(maximumDifference, 0.0f, 0.0f,
+                                          invalid.name + " must not alter or reset the running DSP");
+            }
+        }
+
         beginTest("Frozen legacy fixtures keep missing-default, present-default and unknown-extension semantics");
         {
             ReverseLabAudioProcessor processor(root.getChildFile("legacy-state"));
@@ -1861,6 +2093,7 @@ public:
             const auto xml = juce::parseXML(R"(<ReverseLabState program="1" future="v2">
                 <PARAM id="mix"/><PARAM id="output" value="-3"/>
                 <PARAM id="output" value="-7" extra="retained"/>
+                <PARAM id="futureParameter" value="123" forward="retained"/>
                 <Future payload="untouched"/>
                 </ReverseLabState>)");
             juce::MemoryBlock legacy;
@@ -1879,12 +2112,16 @@ public:
             const auto saved = stateTree(snapshot(processor));
             expectEquals(saved["future"].toString(), juce::String("v2"));
             expectEquals(saved.getChildWithName("Future")["payload"].toString(), juce::String("untouched"));
+            expectEquals(saved.getChildWithProperty("id", "futureParameter")["forward"].toString(),
+                         juce::String("retained"));
             expectEquals(saved.getChild(2)["extra"].toString(), juce::String("retained"));
             expectWithinAbsoluteError(static_cast<float>(saved.getChild(1)["value"]), -3.0f, 1.0e-6f);
             processor.setCurrentProgram(3);
             const auto factory = stateTree(snapshot(processor));
             expectEquals(factory["future"].toString(), juce::String("v2"));
             expect(saved.getChildWithName("Future").isEquivalentTo(factory.getChildWithName("Future")));
+            expect(saved.getChildWithProperty("id", "futureParameter")
+                        .isEquivalentTo(factory.getChildWithProperty("id", "futureParameter")));
             expectEquals(factory.getChild(2)["extra"].toString(), juce::String("retained"));
             ReverseLabAudioProcessor recalled(root.getChildFile("legacy-recalled"));
             restore(recalled, snapshot(processor));

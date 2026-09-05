@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import uuid
 
 
 class ReleaseError(RuntimeError):
@@ -39,6 +40,63 @@ def file_hash(path):
 
 def write_json(path, value):
     path.write_text(json.dumps(value, sort_keys=True, indent=2) + "\n")
+
+
+def write_process_log(path, result):
+    """Persist tool output without recording command arguments or environment values."""
+    chunks = []
+    for value in (getattr(result, "stdout", None), getattr(result, "stderr", None)):
+        if value:
+            chunks.append(value.decode() if isinstance(value, bytes) else value)
+    path.write_text("".join(chunks) or "(no output)\n")
+
+
+def run_and_log(command, destination, runner):
+    try:
+        result = runner(command, capture=True)
+    except subprocess.CalledProcessError as error:
+        write_process_log(destination, error)
+        raise
+    write_process_log(destination, result)
+    return result
+
+
+def read_json_object(raw, description):
+    try:
+        value = json.loads(raw)
+    except (json.JSONDecodeError, TypeError) as error:
+        raise ReleaseError(f"{description} was not valid JSON") from error
+    if not isinstance(value, dict):
+        raise ReleaseError(f"{description} was not a JSON object")
+    return value
+
+
+def read_uuid(value, description):
+    if not isinstance(value, str):
+        raise ReleaseError(f"{description} did not contain a UUID")
+    try:
+        return uuid.UUID(value)
+    except ValueError as error:
+        raise ReleaseError(f"{description} did not contain a valid UUID") from error
+
+
+def validate_notary_log(raw, submission_id):
+    log = read_json_object(raw, "Notarization log")
+    if read_uuid(log.get("jobId"), "Notarization log") != submission_id:
+        raise ReleaseError("Notarization log did not match the submitted job")
+    if log.get("status") != "Accepted" or type(log.get("statusCode")) is not int or log["statusCode"] != 0:
+        raise ReleaseError("Notarization log did not report an accepted job")
+    if "issues" not in log:
+        raise ReleaseError("Notarization log did not contain an issues field")
+    issues = log["issues"]
+    if issues is not None and not isinstance(issues, list):
+        raise ReleaseError("Notarization log issues must be null or a list")
+    if issues is not None:
+        if any(not isinstance(issue, dict) for issue in issues):
+            raise ReleaseError("Notarization log contained a malformed issue")
+        if any(str(issue.get("severity", "")).casefold() == "error" for issue in issues):
+            raise ReleaseError("Notarization log contained an error issue")
+    return log
 
 
 def git(root, *arguments):
@@ -188,7 +246,11 @@ def save_failure_evidence(stage, context, error):
                "CTest-LastTest.log": stage / "build/Testing/Temporary/LastTest.log",
                "CTest-LastTestsFailed.log": stage / "build/Testing/Temporary/LastTestsFailed.log",
                "CMakeConfigureLog.yaml": stage / "build/CMakeFiles/CMakeConfigureLog.yaml",
-               "CMakeError.log": stage / "build/CMakeFiles/CMakeError.log"}
+               "CMakeError.log": stage / "build/CMakeFiles/CMakeError.log",
+               "notary-submit.json": stage / "notary-submit.json",
+               "notary-log.json": stage / "notary-log.json",
+               "gatekeeper-package.log": stage / "gatekeeper-package.log",
+               "gatekeeper-vst3.log": stage / "gatekeeper-vst3.log"}
     for name, source in reports.items():
         if not source.is_file():
             continue  # An earlier failure may never have reached CMake/CTest.
@@ -228,7 +290,10 @@ def package_release(root, configuration="Release", version_override=None, enviro
     version, app, installer, notary, jobs = validate_options(root, configuration, version_override, environment)
     if platform.system() != "Darwin":
         raise ReleaseError("macOS distribution tools are required")
-    for tool in ("cmake", "ctest", "codesign", "ditto", "pkgbuild", "pkgutil", "lipo", "xcrun"):
+    required_tools = ["cmake", "ctest", "codesign", "ditto", "pkgbuild", "pkgutil", "lipo", "xcrun"]
+    if notary:
+        required_tools.append("spctl")
+    for tool in required_tools:
         if not shutil.which(tool):
             raise ReleaseError(f"Missing required release tool: {tool}")
     dist = root / "dist"
@@ -269,10 +334,10 @@ def package_release(root, configuration="Release", version_override=None, enviro
         runner(["ditto", bundle, staged_bundle])
         diagnostics["step"] = "sign_bundle"
         if app:
-            runner(["codesign", "--force", "--deep", "--options", "runtime", "--timestamp", "--sign", app, staged_bundle])
+            runner(["codesign", "--force", "--options", "runtime", "--timestamp", "--sign", app, staged_bundle])
         else:
             print("Warning: ad-hoc VST3 and unsigned installer; no notarization claim.")
-            runner(["codesign", "--force", "--deep", "--sign", "-", staged_bundle])
+            runner(["codesign", "--force", "--sign", "-", staged_bundle])
         packaged_hash = validate_bundle(staged_bundle, version, runner)
         artifacts = stage / "artifacts"
         artifacts.mkdir()
@@ -287,12 +352,27 @@ def package_release(root, configuration="Release", version_override=None, enviro
             command += ["--sign", installer]
         diagnostics["step"] = "pkgbuild"
         runner(command + [package])
+        notary_submission_id = None
         if notary:
-            diagnostics["step"] = "notarize"
+            diagnostics["step"] = "notary_submit"
             response = runner(["xcrun", "notarytool", "submit", package, "--keychain-profile", notary,
                                "--wait", "--output-format", "json"], capture=True)
-            if json.loads(response.stdout).get("status") != "Accepted":
+            submit_raw = response.stdout if isinstance(response.stdout, str) else ""
+            (stage / "notary-submit.json").write_text(submit_raw)
+            submission = read_json_object(submit_raw, "Notarization submission")
+            notary_submission_id = read_uuid(submission.get("id"), "Notarization submission")
+
+            # Fetch the full log whenever Apple returned a usable job ID, including
+            # for an Invalid job, so a failed candidate retains actionable evidence.
+            diagnostics["step"] = "notary_log"
+            log_response = runner(["xcrun", "notarytool", "log", str(notary_submission_id),
+                                   "--keychain-profile", notary], capture=True)
+            log_raw = log_response.stdout if isinstance(log_response.stdout, str) else ""
+            (stage / "notary-log.json").write_text(log_raw)
+            validate_notary_log(log_raw, notary_submission_id)
+            if submission.get("status") != "Accepted":
                 raise ReleaseError("Notarization was not accepted; existing releases are unchanged")
+            diagnostics["step"] = "staple"
             for target in (package, staged_bundle):
                 runner(["xcrun", "stapler", "staple", target])
                 runner(["xcrun", "stapler", "validate", target])
@@ -315,17 +395,34 @@ def package_release(root, configuration="Release", version_override=None, enviro
             raise ReleaseError("Installer payload differs from the signed candidate")
         diagnostics["step"] = "installer_host"
         runner([host, installed])
+        if notary:
+            diagnostics["step"] = "gatekeeper_package"
+            run_and_log(["spctl", "--assess", "--type", "install", "--verbose=4", package],
+                        stage / "gatekeeper-package.log", runner)
+            diagnostics["step"] = "gatekeeper_vst3"
+            run_and_log(["spctl", "--assess", "--type", "execute", "--verbose=4", restored],
+                        stage / "gatekeeper-vst3.log", runner)
         diagnostics["step"] = "write_manifests"
+        if notary:
+            for name in ("notary-submit.json", "notary-log.json",
+                         "gatekeeper-package.log", "gatekeeper-vst3.log"):
+                shutil.copy2(stage / name, artifacts / name)
         write_json(artifacts / "source-manifest.json", provenance)
+        verification = ["generated_factory_bank_matches_snapshot", "fresh_snapshot_build", "ctest",
+                        "zip_host_state_audio_roundtrip", "installer_payload_host_state_audio_roundtrip",
+                        "both_macos11_slices"]
+        if notary:
+            verification += ["notary_log_accepted", "gatekeeper_package", "gatekeeper_zip_vst3"]
         manifest = {"schema": 1, "version": version, "configuration": configuration,
                     "commit": provenance["repositories"][0]["commit"],
                     "source_sha256": provenance["source_sha256"],
                     "dirty": any(repo["dirty"] for repo in provenance["repositories"]),
                     "built_binary_sha256": built_hash, "packaged_binary_sha256": packaged_hash,
                     "application_signed": bool(app), "installer_signed": bool(installer), "notarized": bool(notary),
-                    "verification": ["generated_factory_bank_matches_snapshot", "fresh_snapshot_build", "ctest", "zip_host_state_audio_roundtrip",
-                                     "installer_payload_host_state_audio_roundtrip", "both_macos11_slices"],
+                    "verification": verification,
                     "artifacts": {path.name: file_hash(path) for path in sorted(artifacts.iterdir())}}
+        if notary_submission_id is not None:
+            manifest["notary_submission_id"] = str(notary_submission_id)
         write_json(artifacts / "release-manifest.json", manifest)
         checksums = "".join(f"{file_hash(path)}  {path.name}\n" for path in sorted(artifacts.iterdir()))
         (artifacts / "SHA256SUMS.txt").write_text(checksums)

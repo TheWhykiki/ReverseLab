@@ -41,6 +41,11 @@ jobs:
         run: cmake --build ${{ matrix.build_dir }} --config Release
       - name: Test
         run: ctest --test-dir ${{ matrix.build_dir }} -C Release --output-on-failure
+      - name: Stress native chooser teardown on arm64
+        if: matrix.native_arch == 'arm64'
+        run: >-
+          ctest --test-dir ${{ matrix.build_dir }} -C Release --output-on-failure --no-tests=error --repeat until-fail:10
+          -R '^(ReverseLabNativeChooser_(import_destroy|export_hide_then_destroy)|ReverseLabNativeChoosersSequential)$'
       - name: Verify universal slices and deployment target
         run: |
           bundle="${{ matrix.build_dir }}/ReverseLab_artefacts/Release/VST3/ReverseLab.vst3"
@@ -333,6 +338,13 @@ jobs:
           ASAN_OPTIONS: detect_leaks=0
           UBSAN_OPTIONS: print_stacktrace=1
         run: ctest --test-dir build-asan --output-on-failure
+      - name: Stress native chooser teardown under sanitizers
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+          UBSAN_OPTIONS: print_stacktrace=1
+        run: >-
+          ctest --test-dir build-asan --output-on-failure --no-tests=error --repeat until-fail:10
+          -R '^(ReverseLabNativeChooser_(import_destroy|export_hide_then_destroy)|ReverseLabNativeChoosersSequential)$'
       - name: Verify Makefiles bundle and ZIP roundtrip
         env:
           ASAN_OPTIONS: detect_leaks=0

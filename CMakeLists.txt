@@ -183,6 +183,8 @@ add_test(NAME ReverseLabWindowsIntegrationContract COMMAND "${Python3_EXECUTABLE
     -s "${CMAKE_CURRENT_SOURCE_DIR}/scripts/tests" -p "test_windows_integration.py")
 add_test(NAME ReverseLabWindowsReleaseContract COMMAND "${Python3_EXECUTABLE}" -B -m unittest discover
     -s "${CMAKE_CURRENT_SOURCE_DIR}/scripts/tests" -p "test_windows_release_contract.py")
+add_test(NAME ReverseLabWindowsReleaseBootstrap COMMAND "${Python3_EXECUTABLE}" -B -m unittest discover
+    -s "${CMAKE_CURRENT_SOURCE_DIR}/scripts/tests" -p "test_windows_release_bootstrap.py")
 # These harnesses exercise macOS release/install scripts with POSIX permissions,
 # signals, symlinks and /bin/bash. Their fake-tool tests are useful on macOS and
 # Linux, but registering them on Windows would be a platform error rather than a

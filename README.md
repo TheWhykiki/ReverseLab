@@ -61,9 +61,12 @@ ctest --test-dir build-windows-arm64ec -C Release --output-on-failure
 
 The default build compiles the complete Windows updater in a side-effect-free
 self-test mode. A distributable build additionally requires
-`-DREVERSELAB_WINDOWS_UPDATER_SIGNER_SHA256=<64-hex-certificate-fingerprint>`;
-only then is `ReverseLabUpdater.exe` embedded and the **Updates...** button
-enabled. Build the reviewed MSI with `scripts/build-windows-installer.ps1` as
+`-DREVERSELAB_WINDOWS_UPDATER_SIGNER_SHA256=<current-64-hex-certificate-fingerprint>`;
+this enables the embedded `ReverseLabUpdater.exe` and the **Updates...** button.
+The optional, distinct
+`-DREVERSELAB_WINDOWS_UPDATER_NEXT_SIGNER_SHA256=<next-64-hex-certificate-fingerprint>`
+is used only for the documented two-release certificate-rotation bridge. Build
+the reviewed MSI with `scripts/build-windows-installer.ps1` as
 documented in [WINDOWS_INSTALLER.md](WINDOWS_INSTALLER.md). Updater verification,
 release naming and recovery behavior are specified in
 [WINDOWS_UPDATER.md](WINDOWS_UPDATER.md).

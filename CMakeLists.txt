@@ -287,6 +287,35 @@ add_test(NAME ReverseLabPresets COMMAND ReverseLabPresetTests)
 set_tests_properties(ReverseLabPresets PROPERTIES TIMEOUT 600)
 
 if(APPLE)
+    # Every macOS binary that instantiates PresetBar gets the same module-local
+    # native-callback lifetime guard. Keep it independent of updater packaging.
+    foreach(module_pin_target IN ITEMS ReverseLab ReverseLabTests ReverseLabRenderAB ReverseLabPresetTests)
+        target_sources(${module_pin_target} PRIVATE Source/MacModulePin.cpp Source/MacModulePin.h)
+    endforeach()
+
+    # Prove the guard with a genuinely unloadable module. Sanitizer runtimes can
+    # make an instrumented DSO non-unloadable themselves, invalidating the
+    # negative control; the normal arm64/x86_64 jobs run these two probes.
+    set(REVERSELAB_MODULE_PIN_TEST_FLAGS
+        "${CMAKE_C_FLAGS} ${CMAKE_CXX_FLAGS} ${CMAKE_EXE_LINKER_FLAGS} ${CMAKE_MODULE_LINKER_FLAGS}")
+    if(NOT REVERSELAB_MODULE_PIN_TEST_FLAGS MATCHES "(^|[ ;])-fsanitize=")
+        add_library(ReverseLabMacModulePinFixture MODULE
+            Tests/MacModulePinFixture.cpp Source/MacModulePin.cpp Source/MacModulePin.h)
+        target_include_directories(ReverseLabMacModulePinFixture PRIVATE Source)
+        target_link_libraries(ReverseLabMacModulePinFixture PRIVATE juce::juce_recommended_warning_flags)
+        add_executable(ReverseLabMacModulePinTests Tests/MacModulePinTests.cpp)
+        target_link_libraries(ReverseLabMacModulePinTests PRIVATE juce::juce_recommended_warning_flags)
+        add_dependencies(ReverseLabMacModulePinTests ReverseLabMacModulePinFixture)
+        add_dependencies(ReverseLabPresetTests ReverseLabMacModulePinTests)
+        add_test(NAME ReverseLabMacModulePinPinned COMMAND ReverseLabMacModulePinTests
+            pinned "$<TARGET_FILE:ReverseLabMacModulePinFixture>")
+        add_test(NAME ReverseLabMacModulePinUnpinned COMMAND ReverseLabMacModulePinTests
+            unpinned "$<TARGET_FILE:ReverseLabMacModulePinFixture>")
+        set_tests_properties(ReverseLabMacModulePinPinned ReverseLabMacModulePinUnpinned
+            PROPERTIES TIMEOUT 30)
+    endif()
+    unset(REVERSELAB_MODULE_PIN_TEST_FLAGS)
+
     # Test-only Cocoa observation proves that native file panels really open and
     # close. Product code and non-macOS tests do not depend on this bridge.
     # Updater.cmake enables Objective-C++; sanitizer configurations must pass

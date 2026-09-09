@@ -58,14 +58,17 @@ public:
 #endif
 
 private:
+    // The audible cubic read may overshoot its neighbours. Feedback uses a separate convex
+    // interpolation/mix so a gain below one remains a contraction, even for correlated audio.
+    struct ReadSample { float output = 0.0f, feedback = 0.0f; };
+
     struct Head
     {
         float phase = 0.0f;
         double readOffset = 0.0;        // samples read back from segmentEnd (accumulated, speed-integrated)
         double nextOffset = 0.0;        // same for the incoming segment during the crossfade
         float transitionPhase = 0.0f;  // samples elapsed since the crossfade started
-        float lastRead = 0.0f;
-        float nextLastRead = 0.0f;
+        ReadSample lastRead, nextLastRead;
         double historyRemaining = 0.0;
         double nextHistoryRemaining = 0.0;
         int segmentEnd = 0;
@@ -78,11 +81,12 @@ private:
         bool wasFrozen = false;
         bool lastRetrigger = false;
         float antiAliasState = 0.0f;
+        float feedbackAntiAliasState = 0.0f;
     };
 
-    float readInterpolated(int channel, double position) const noexcept;
-    float readCaptured(int channel, int end, double offset, float speed, bool mayOverwrite,
-                       double& remaining, float& lastRead, bool& exhausted) const noexcept;
+    ReadSample readInterpolated(int channel, double position) const noexcept;
+    ReadSample readCaptured(int channel, int end, double offset, float speed, bool mayOverwrite,
+                            double& remaining, ReadSample& lastRead, bool& exhausted) const noexcept;
     double distanceFromWriter(double readPosition) const noexcept;
     void beginSegment(int channel, int requestedLength, const EngineSettings&) noexcept;
     void prepareNextSegment(int channel, int requestedLength, const EngineSettings&) noexcept;

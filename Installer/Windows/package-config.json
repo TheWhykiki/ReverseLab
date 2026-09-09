@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "productName": "ReverseLab",
+  "manufacturer": "Whykiki Audio",
+  "vst3Classes": [
+    {
+      "cid": "ABCDEF019182FAEB576B696B52764C62",
+      "category": "Audio Module Class"
+    },
+    {
+      "cid": "ABCDEF011234ABCD576B696B52764C62",
+      "category": "Component Controller Class"
+    }
+  ],
+  "upgradeCodes": {
+    "x64": "401FF4C1-8222-5AB2-987E-AD712164A814",
+    "arm64ec": "28025E3A-AEE3-5516-8BB8-8FCD65D902D6"
+  }
+}

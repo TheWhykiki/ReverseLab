@@ -6,3 +6,7 @@
 /.DS_Store
 *.xcuserstate
 xcuserdata/
+
+/build-presets/
+/build-review-*/
+/build-updater/

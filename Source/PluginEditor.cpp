@@ -1,4 +1,5 @@
 #include "PluginEditor.h"
+#include "UpdaterLauncher.h"
 #include <cmath>
 
 namespace
@@ -164,18 +165,21 @@ void ScopeComponent::paint(juce::Graphics& g)
 }
 
 ReverseLabAudioProcessorEditor::ReverseLabAudioProcessorEditor(ReverseLabAudioProcessor& p)
-    : AudioProcessorEditor(&p), pluginProcessor(p), scope(p)
+    : AudioProcessorEditor(&p), pluginProcessor(p), scope(p), presetBar(p.presets)
 {
+    // setResizeLimits() constrains the editor's initial 0x0 bounds and may call
+    // resized(), which persists the transient minimum size. Capture the actual
+    // processor-owned size before configuring those bounds.
+    const auto savedSize = pluginProcessor.getLastEditorSize();
     setLookAndFeel(&lookAndFeel);
     setResizable(true, true);
     setResizeLimits(720, 460, 1440, 920);
-    const auto savedSize = pluginProcessor.getLastEditorSize();
     setSize(savedSize.x, savedSize.y);
     pluginProcessor.acknowledgeRestoredEditorSize(savedSize.x, savedSize.y);
     title.setText("ReverseLab", juce::dontSendNotification);
     title.setFont(juce::Font(juce::FontOptions(27.0f, juce::Font::bold)));
     title.setColour(juce::Label::textColourId, text);
-    subtitle.setText("STUDIO INSTRUMENT", juce::dontSendNotification);
+    subtitle.setText("STUDIO EFFECT", juce::dontSendNotification);
     subtitle.setFont(juce::Font(juce::FontOptions(10.5f, juce::Font::bold)));
     subtitle.setColour(juce::Label::textColourId, accent);
     latencyLabel.setColour(juce::Label::textColourId, muted);
@@ -200,15 +204,9 @@ ReverseLabAudioProcessorEditor::ReverseLabAudioProcessorEditor(ReverseLabAudioPr
     configureButton(bypass, "BYPASS", rl::params::bypass, bypassAttachment);
     freeze.setDescription("Hold the current reverse buffer");
     retrigger.setDescription("Restart the reverse section momentarily");
-    presetLabel.setText("PRESET", juce::dontSendNotification);
-    presetLabel.setColour(juce::Label::textColourId, muted);
-    presetLabel.setFont(juce::Font(juce::FontOptions(9.5f, juce::Font::bold)));
-    for (int i = 0; i < pluginProcessor.getNumPrograms(); ++i)
-        presetBox.addItem(pluginProcessor.getProgramName(i), i + 1);
-    presetBox.setSelectedId(pluginProcessor.getCurrentProgram() + 1, juce::dontSendNotification);
-    presetBox.setTitle("Factory preset");
-    presetBox.onChange = [this] { pluginProcessor.setCurrentProgram(presetBox.getSelectedId() - 1); };
-    addAndMakeVisible(presetLabel); addAndMakeVisible(presetBox);
+    addAndMakeVisible(presetBar);
+    wk::configureUpdaterButton(updates, "ReverseLab", REVERSELAB_VERSION_STRING);
+    addAndMakeVisible(updates);
     startTimerHz(10);
     showingSyncValues = pluginProcessor.parameters.getRawParameterValue(rl::params::sync)->load() > 0.5f;
     leftSize.setVisible(showingSyncValues); rightSize.setVisible(showingSyncValues);
@@ -281,16 +279,7 @@ void ReverseLabAudioProcessorEditor::configureKnob(Knob& knob, const juce::Strin
     knob.label.setFont(juce::Font(juce::FontOptions(9.5f, juce::Font::bold)));
     knob.label.setJustificationType(juce::Justification::centred);
     knob.attachment = std::make_unique<SliderAttachment>(pluginProcessor.parameters, id, knob.slider);
-    if (juce::String(id) == rl::params::highpass)
-        knob.slider.textFromValueFunction = [](double value)
-        {
-            return value <= 20.01 ? juce::String("Off") : juce::String(value, 0) + " Hz";
-        };
-    else if (juce::String(id) == rl::params::lowpass)
-        knob.slider.textFromValueFunction = [](double value)
-        {
-            return value >= 19999.0 ? juce::String("Off") : juce::String(value, 0) + " Hz";
-        };
+    // The parameter owns both text directions, including the filter bypass sentinel.
     knob.slider.updateText();
     addAndMakeVisible(knob.slider); addAndMakeVisible(knob.label);
 }
@@ -308,8 +297,9 @@ void ReverseLabAudioProcessorEditor::paint(juce::Graphics& g)
     g.fillAll(background);
     auto area = contentBounds(*this);
     area.removeFromTop(juce::jlimit(42, 56, static_cast<int>(static_cast<float>(getHeight()) * 0.09f)));
-    area.removeFromTop(juce::jlimit(92, 138, static_cast<int>(static_cast<float>(getHeight()) * 0.22f)) + 7);
-    auto timing = area.removeFromTop(juce::jlimit(102, 150, static_cast<int>(static_cast<float>(getHeight()) * 0.24f)));
+    area.removeFromTop(36);
+    area.removeFromTop(juce::jlimit(74, 120, static_cast<int>(static_cast<float>(getHeight()) * 0.19f)) + 7);
+    auto timing = area.removeFromTop(juce::jlimit(90, 140, static_cast<int>(static_cast<float>(getHeight()) * 0.22f)));
     g.setColour(panel.withAlpha(0.82f)); g.fillRoundedRectangle(timing.toFloat(), 10.0f);
     g.setColour(border); g.drawRoundedRectangle(timing.toFloat().reduced(0.5f), 10.0f, 1.0f);
     area.removeFromTop(7 + juce::jlimit(40, 52, static_cast<int>(static_cast<float>(getHeight()) * 0.085f)) + 7);
@@ -340,15 +330,15 @@ void ReverseLabAudioProcessorEditor::resized()
     title.setBounds(header.removeFromLeft(compact ? 150 : 185));
     subtitle.setVisible(!compact);
     if (!compact) subtitle.setBounds(header.removeFromLeft(130).withTrimmedTop(5));
+    updates.setBounds(header.removeFromRight(88).reduced(2, 7));
     bypass.setBounds(header.removeFromRight(compact ? 66 : 76).reduced(2, 7));
     latencyLabel.setBounds(header.removeFromRight(compact ? 116 : 150));
     link.setBounds(header.removeFromRight(compact ? 66 : 78).reduced(2, 7));
     sync.setBounds(header.removeFromRight(compact ? 58 : 66).reduced(2, 7));
-    auto presetArea = header.reduced(4, 0);
-    presetLabel.setBounds(presetArea.removeFromTop(15)); presetBox.setBounds(presetArea.removeFromTop(30));
-    scope.setBounds(area.removeFromTop(juce::jlimit(92, 138, static_cast<int>(static_cast<float>(getHeight()) * 0.22f))));
+    presetBar.setBounds(area.removeFromTop(36));
+    scope.setBounds(area.removeFromTop(juce::jlimit(74, 120, static_cast<int>(static_cast<float>(getHeight()) * 0.19f))));
     area.removeFromTop(7);
-    auto timing = area.removeFromTop(juce::jlimit(102, 150, static_cast<int>(static_cast<float>(getHeight()) * 0.24f))).reduced(8, 3);
+    auto timing = area.removeFromTop(juce::jlimit(90, 140, static_cast<int>(static_cast<float>(getHeight()) * 0.22f))).reduced(8, 3);
     auto left = timing.removeFromLeft(timing.getWidth() / 2).reduced(8, 0), right = timing.reduced(8, 0);
     leftSizeLabel.setBounds(left.removeFromTop(18)); leftSize.setBounds(left); leftFreeTime.setBounds(left);
     rightSizeLabel.setBounds(right.removeFromTop(18)); rightSize.setBounds(right); rightFreeTime.setBounds(right);
@@ -383,9 +373,6 @@ void ReverseLabAudioProcessorEditor::timerCallback()
         setSize(restoredSize.x, restoredSize.y);
     pluginProcessor.acknowledgeRestoredEditorSize(restoredSize.x, restoredSize.y);
 
-    const auto programId = pluginProcessor.getCurrentProgram() + 1;
-    if (presetBox.getSelectedId() != programId)
-        presetBox.setSelectedId(programId, juce::dontSendNotification);
     const auto wantsSyncValues = pluginProcessor.parameters.getRawParameterValue(rl::params::sync)->load() > 0.5f;
     if (wantsSyncValues != showingSyncValues)
     {
@@ -404,7 +391,7 @@ void ReverseLabAudioProcessorEditor::timerCallback()
     rightSize.setAlpha(linked ? 0.42f : 1.0f);
     rightFreeTime.setAlpha(linked ? 0.42f : 1.0f);
     rightSizeLabel.setAlpha(linked ? 0.56f : 1.0f);
-    rightSizeLabel.setText(linked ? "RIGHT SIZE · LINKED" : "RIGHT SIZE", juce::dontSendNotification);
+    rightSizeLabel.setText(linked ? "RIGHT SIZE - LINKED" : "RIGHT SIZE", juce::dontSendNotification);
     const auto samples = pluginProcessor.getCurrentLatencySamples();
     const auto ms = samples * 1000.0 / juce::jmax(1.0, pluginProcessor.getSampleRate());
     latencyLabel.setText("LATENCY  " + juce::String(samples) + " smp  /  " + juce::String(ms, 1) + " ms",

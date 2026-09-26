@@ -234,17 +234,12 @@ jobs:
         run: >
           ctest --test-dir ${{ matrix.build_dir }} -C Release --output-on-failure
           --no-tests=error -R "^ReverseLabPresets$"
-      - name: Rebuild and load from complete source ZIP without Git
-        shell: pwsh
-        run: >-
-          python -B scripts/test-source-roundtrip.py --juce external/JUCE
-          --generator "${{ matrix.generator }}" --platform "${{ matrix.platform }}"
       - name: Package roundtrip and load the extracted VST3
         shell: pwsh
         run: |
           $build = '${{ matrix.build_dir }}'
           $bundle = (Resolve-Path -LiteralPath "$build/ReverseLab_artefacts/Release/VST3/ReverseLab.vst3").Path
-          $archive = 'ReverseLab-Windows-${{ matrix.artifact_arch }}-VST3-UNSIGNED-NOT-FOR-DISTRIBUTION.zip'
+          $archive = Join-Path $build 'ReverseLab-Windows-${{ matrix.artifact_arch }}-VST3-UNSIGNED-NOT-FOR-DISTRIBUTION.zip'
           $roundtrip = Join-Path $build 'artifact-roundtrip'
           Compress-Archive -LiteralPath $bundle -DestinationPath $archive
           Expand-Archive -LiteralPath $archive -DestinationPath $roundtrip
@@ -291,10 +286,15 @@ jobs:
             -UpdaterTestPath "${{ matrix.build_dir }}/Release/ReverseLabWindowsUpdaterSelfTests.exe" `
             -AllowUnsigned
           if ($LASTEXITCODE -ne 0) { throw 'Windows MSI validation failed' }
+      - name: Rebuild and load from complete source ZIP without Git
+        shell: pwsh
+        run: >-
+          python -B scripts/test-source-roundtrip.py --juce external/JUCE
+          --generator "${{ matrix.generator }}" --platform "${{ matrix.platform }}"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ReverseLab-Windows-${{ matrix.artifact_arch }}-VST3-UNSIGNED-NOT-FOR-DISTRIBUTION
-          path: ReverseLab-Windows-${{ matrix.artifact_arch }}-VST3-UNSIGNED-NOT-FOR-DISTRIBUTION.zip
+          path: ${{ matrix.build_dir }}/ReverseLab-Windows-${{ matrix.artifact_arch }}-VST3-UNSIGNED-NOT-FOR-DISTRIBUTION.zip
           if-no-files-found: error
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:

@@ -1,4 +1,5 @@
 #include "UpdaterPolicy.h"
+#include "Authenticode.h"
 
 #include <cstdlib>
 #include <array>
@@ -213,6 +214,46 @@ int main()
                 && ! isCanonicalGuid("{401FF4C1-8222-5AB2-987E-AD712164A814}"),
             "canonical UpgradeCode format");
 
+    require(wk::authenticode::validProfileEku("1.3.6.1.4.1.311.97.990309390.766961637.194916062.941502583"),
+            "Artifact Signing subscriber EKU accepted");
+    for (const auto invalid : { "", "1.3.6.1.4.1.311.97.1.0",
+            "1.3.6.1.4.1.311.97.1.3.1.234", "1.3.6.1.4.1.311.97.12.13.14",
+            "1.3.6.1.4.1.311.97.12.13.14.15.", "1.3.6.1.4.1.311.97.12.013.14.15",
+            "1.3.6.1.4.1.311.97.4294967296.13.14.15" })
+        require(! wk::authenticode::validProfileEku(invalid), "Malformed/non-subscriber EKU rejected");
+    const std::vector<MsiSequenceRow> sequence {
+        { "FindRelatedProducts", "", "25" }, { "LaunchConditions", "", "100" },
+        { "MigrateFeatureStates", "", "1200" }, { "InstallInitialize", "", "1500" },
+        { "RemoveExistingProducts", "", "1501" }, { "InstallFiles", "", "4000" }
+    };
+    require(hasSafeMsiExecuteSequence(sequence), "MSI launch conditions run after upgrade discovery");
+    for (std::size_t index = 0; index < sequence.size(); ++index)
+    {
+        for (const auto bad : { "", "0", "-1", "wat" })
+        {
+            auto mutant = sequence;
+            mutant[index].sequence = bad;
+            require(! hasSafeMsiExecuteSequence(mutant), "NULL/nonpositive MSI sequence rejected");
+        }
+        auto mutant = sequence;
+        mutant[index].condition = "0";
+        require(! hasSafeMsiExecuteSequence(mutant), "Conditional MSI security action rejected");
+        mutant = sequence;
+        mutant.push_back(sequence[index]);
+        require(! hasSafeMsiExecuteSequence(mutant), "Duplicate MSI security action rejected");
+        if (sequence[index].action != "MigrateFeatureStates")
+        {
+            mutant = sequence;
+            mutant.erase(mutant.begin() + static_cast<std::ptrdiff_t>(index));
+            require(! hasSafeMsiExecuteSequence(mutant), "Missing MSI security action rejected");
+        }
+    }
+    auto wrongOrder = sequence;
+    wrongOrder[0].sequence = "101";
+    require(! hasSafeMsiExecuteSequence(wrongOrder), "Late upgrade discovery rejected");
+    wrongOrder = sequence;
+    wrongOrder[2].sequence = "24";
+    require(! hasSafeMsiExecuteSequence(wrongOrder), "Premature feature migration rejected");
     const std::string currentCode = "401FF4C1-8222-5AB2-987E-AD712164A814";
     const std::string otherCode = "28025E3A-AEE3-5516-8BB8-8FCD65D902D6";
     const std::vector<MsiUpgradeRow> upgrades {

@@ -2,13 +2,17 @@
 
 ReverseLab is a tempo-synchronised stereo reverse VST3 effect for macOS and Windows.
 
-Copyright © 2026 Whykiki Audio. ReverseLab is free software licensed under the GNU Affero General Public License v3.0; see [LICENSE](LICENSE). JUCE remains available under its own dual-licensing terms.
+Copyright © 2026 Whykiki Audio. The original ReverseLab code and 64 original
+factory presets are free software licensed under **AGPL-3.0-only**; see
+[LICENSE](LICENSE). The project owner has confirmed the rights to this original
+code and these presets. JUCE modules use the AGPLv3 option; dependencies retain
+their own terms and notices in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 Any distributed binary must remain traceable to its exact corresponding source.
-Tag the release commit, keep the source tag publicly available, and record that tag
-and commit alongside the binary checksums. A local candidate directory or an
-untagged branch head is not, by itself, the corresponding-source record for a
-public release.
+Each new public binary release includes a deterministic complete source ZIP with
+the exact JUCE revision, build scripts, presets, SPDX inventory and source
+manifest. Keep the source tag publicly available and bind the source archive to
+the binary release checksums. See [source archives and rebuilds](docs/SOURCE_RELEASE.md).
 
 ## Download and install (current macOS release)
 

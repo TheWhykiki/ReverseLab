@@ -6,6 +6,43 @@ on:
   pull_request:
 
 jobs:
+  release-parity:
+    name: Shared release contract parity
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          path: current
+          persist-credentials: false
+      - name: Resolve coordinated peer branch to an immutable commit
+        id: peer
+        env:
+          WK_PEER_REPOSITORY: TheWhykiki/SubLab808
+          WK_PEER_REF: ${{ github.head_ref || github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git check-ref-format "refs/heads/$WK_PEER_REF"
+          resolved="$(git ls-remote --heads "https://github.com/$WK_PEER_REPOSITORY.git" "refs/heads/$WK_PEER_REF")"
+          if [ -z "$resolved" ]; then
+            WK_PEER_REF=main
+            resolved="$(git ls-remote --heads "https://github.com/$WK_PEER_REPOSITORY.git" refs/heads/main)"
+          fi
+          sha="${resolved%%$'\t'*}"
+          [[ "$sha" =~ ^[0-9a-f]{40}$ ]]
+          printf 'sha=%s\n' "$sha" >> "$GITHUB_OUTPUT"
+          printf 'Peer: %s at %s (%s)\n' "$WK_PEER_REPOSITORY" "$sha" "$WK_PEER_REF" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: TheWhykiki/SubLab808
+          ref: ${{ steps.peer.outputs.sha }}
+          path: peer
+          persist-credentials: false
+      - name: Reject cross-product security and release drift
+        run: python3 -B current/scripts/release_contract.py --repo current --other peer
+
   macos:
     name: macOS universal build + ${{ matrix.display }} tests
     strategy:
@@ -41,6 +78,10 @@ jobs:
         run: cmake --build ${{ matrix.build_dir }} --config Release
       - name: Test
         run: ctest --test-dir ${{ matrix.build_dir }} -C Release --output-on-failure
+      - name: Rebuild and load from complete source ZIP without Git
+        run: >-
+          python3 -B scripts/test-source-roundtrip.py
+          --juce external/JUCE --generator Xcode
       - name: Stress native chooser teardown on arm64
         if: matrix.native_arch == 'arm64'
         run: >-
@@ -193,6 +234,11 @@ jobs:
         run: >
           ctest --test-dir ${{ matrix.build_dir }} -C Release --output-on-failure
           --no-tests=error -R "^ReverseLabPresets$"
+      - name: Rebuild and load from complete source ZIP without Git
+        shell: pwsh
+        run: >-
+          python -B scripts/test-source-roundtrip.py --juce external/JUCE
+          --generator "${{ matrix.generator }}" --platform "${{ matrix.platform }}"
       - name: Package roundtrip and load the extracted VST3
         shell: pwsh
         run: |
@@ -242,6 +288,7 @@ jobs:
             -Version $version `
             -OutputDirectory "$build/windows-installer" `
             -HostTestPath $hostTestBinary `
+            -UpdaterTestPath "${{ matrix.build_dir }}/Release/ReverseLabWindowsUpdaterSelfTests.exe" `
             -AllowUnsigned
           if ($LASTEXITCODE -ne 0) { throw 'Windows MSI validation failed' }
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

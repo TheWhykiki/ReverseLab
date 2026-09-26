@@ -1,5 +1,12 @@
 # DAW-Abnahme für SubLab808 und ReverseLab
 
+Für signierte Releases gilt zusätzlich die [zwölffache Plattform-/Host-Matrix](RELEASE_ACCEPTANCE.md)
+mit Receipt-Schema 2. Physische CPU, Host-Prozessarchitektur und geladener Binärhash
+müssen zum Release passen. Auf dem Apple-Silicon-Referenzsystem sind alle 64
+Factory-Presets in beiden Hosts zu prüfen, auf den übrigen Systemen jeweils die
+acht unten festgelegten Schwerpunkt-Presets. Dieses Protokoll liefert die
+Audio- und Bedienprüfungen, ersetzt aber nicht das vollständige Release-Receipt.
+
 Dieses Protokoll beschreibt noch auszuführende Prüfungen im DAW-Plugin. Ein
 grüner Audio-Bericht bestätigt die ausgewerteten Exporte; die folgenden
 Bedien- und Hörprüfungen benötigen eigene Ergebnisse. Alle Prüffälle beginnen

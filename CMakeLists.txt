@@ -6,7 +6,11 @@ if(CMAKE_HOST_APPLE)
     set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "Minimum macOS version" FORCE)
     set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64" CACHE STRING "Universal macOS build" FORCE)
 endif()
-project(ReverseLab VERSION 1.1.0 LANGUAGES C CXX)
+include(cmake/ReleaseProduct.cmake)
+project(ReverseLab VERSION ${WK_PRODUCT_VERSION} LANGUAGES C CXX)
+if(NOT PROJECT_NAME STREQUAL WK_PRODUCT_NAME)
+    message(FATAL_ERROR "release/product.json does not identify this project")
+endif()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -16,6 +20,15 @@ if(MSVC)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()
 
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/external/JUCE/.git")
+    execute_process(COMMAND git -C "${CMAKE_CURRENT_SOURCE_DIR}/external/JUCE" rev-parse HEAD
+        OUTPUT_VARIABLE WK_LOCAL_JUCE_COMMIT OUTPUT_STRIP_TRAILING_WHITESPACE)
+    if(NOT WK_LOCAL_JUCE_COMMIT STREQUAL WK_JUCE_COMMIT)
+        message(FATAL_ERROR "external/JUCE must match the release product commit")
+    endif()
+else()
+    wk_validate_source_juce("${CMAKE_CURRENT_SOURCE_DIR}")
+endif()
 add_subdirectory(external/JUCE)
 
 if(WIN32)
@@ -70,12 +83,12 @@ include(cmake/JuceVST3ManifestHelperPlatform.cmake)
 
 juce_add_plugin(ReverseLab
     VERSION ${PROJECT_VERSION}
-    COMPANY_NAME "Whykiki Audio"
-    BUNDLE_ID "audio.whykiki.reverselab"
-    PLUGIN_MANUFACTURER_CODE Wkik
-    PLUGIN_CODE RvLb
+    COMPANY_NAME "${WK_PRODUCT_MANUFACTURER}"
+    BUNDLE_ID "${WK_PRODUCT_BUNDLE_ID}"
+    PLUGIN_MANUFACTURER_CODE "${WK_PLUGIN_MANUFACTURER_CODE}"
+    PLUGIN_CODE "${WK_PLUGIN_CODE}"
     FORMATS VST3
-    PRODUCT_NAME "ReverseLab"
+    PRODUCT_NAME "${WK_PRODUCT_NAME}"
     VST3_CATEGORIES Fx Delay
     COPY_PLUGIN_AFTER_BUILD FALSE)
 
@@ -345,3 +358,12 @@ if(APPLE)
         "$<TARGET_FILE:ReverseLabPresetTests>")
     set_tests_properties(ReverseLabNativeChoosersSequential PROPERTIES TIMEOUT 480 RUN_SERIAL TRUE)
 endif()
+
+# Shared release policy and corresponding-source archive verification.
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+add_test(NAME ReverseLabSharedReleaseContract COMMAND "${Python3_EXECUTABLE}" -B -m unittest discover
+    -s "${CMAKE_CURRENT_SOURCE_DIR}/scripts/tests" -p "test_source_release.py")
+foreach(contract_suite owner_promotion release_protection release_gate_key)
+    add_test(NAME ReverseLab_${contract_suite} COMMAND "${Python3_EXECUTABLE}" -B -m unittest discover
+        -s "${CMAKE_CURRENT_SOURCE_DIR}/scripts/tests" -p "test_${contract_suite}.py")
+endforeach()

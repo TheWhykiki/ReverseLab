@@ -207,6 +207,14 @@ ReverseLabAudioProcessorEditor::ReverseLabAudioProcessorEditor(ReverseLabAudioPr
     addAndMakeVisible(presetBar);
     wk::configureUpdaterButton(updates, "ReverseLab", REVERSELAB_VERSION_STRING);
     addAndMakeVisible(updates);
+    licensePanel.configure("ReverseLab", REVERSELAB_VERSION_STRING);
+    addChildComponent(licensePanel);
+    about.onClick = [this] {
+        licensePanel.setVisible(true);
+        licensePanel.toFront(true);
+    };
+    about.setTooltip("Version, licence and complete source");
+    addAndMakeVisible(about);
     startTimerHz(10);
     showingSyncValues = pluginProcessor.parameters.getRawParameterValue(rl::params::sync)->load() > 0.5f;
     leftSize.setVisible(showingSyncValues); rightSize.setVisible(showingSyncValues);
@@ -324,6 +332,8 @@ void ReverseLabAudioProcessorEditor::paint(juce::Graphics& g)
 void ReverseLabAudioProcessorEditor::resized()
 {
     pluginProcessor.setLastEditorSize(getWidth(), getHeight());
+    about.setBounds(getWidth() - 90, getHeight() - 25, 64, 20);
+    licensePanel.setBounds(getLocalBounds().withSizeKeepingCentre(560, 300));
     auto area = contentBounds(*this);
     const auto compact = getWidth() < 820;
     auto header = area.removeFromTop(juce::jlimit(42, 56, static_cast<int>(static_cast<float>(getHeight()) * 0.09f)));

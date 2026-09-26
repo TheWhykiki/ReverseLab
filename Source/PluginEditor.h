@@ -1,5 +1,6 @@
 #pragma once
 #include "PresetBar.h"
+#include "LicensePanel.h"
 
 #include <juce_gui_extra/juce_gui_extra.h>
 #include "PluginProcessor.h"
@@ -69,6 +70,8 @@ private:
     juce::Slider leftSize, rightSize, leftFreeTime, rightFreeTime;
     wk::PresetBar presetBar;
     juce::TextButton updates;
+    juce::TextButton about { "About" };
+    wk::LicensePanel licensePanel;
     juce::ToggleButton sync, link, freeze, retrigger, bypass;
     std::array<Knob, 10> knobs;
     std::unique_ptr<SliderAttachment> leftSizeAttachment, rightSizeAttachment;

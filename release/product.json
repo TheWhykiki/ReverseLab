@@ -1,0 +1,24 @@
+{
+  "release-contract-version": 2,
+  "productName": "ReverseLab",
+  "manufacturer": "Whykiki Audio",
+  "bundleId": "audio.whykiki.reverselab",
+  "version": "1.1.0",
+  "repository": "TheWhykiki/ReverseLab",
+  "pluginManufacturerCode": "Wkik",
+  "pluginCode": "RvLb",
+  "license": "AGPL-3.0-only",
+  "juce": {
+    "version": "8.0.15",
+    "commit": "91ad83ae34a81e0833b1a2b0866f54846370ae53",
+    "sourcePath": "external/JUCE"
+  },
+  "vst3Classes": [
+    {"cid": "ABCDEF019182FAEB576B696B52764C62", "category": "Audio Module Class"},
+    {"cid": "ABCDEF011234ABCD576B696B52764C62", "category": "Component Controller Class"}
+  ],
+  "upgradeCodes": {
+    "x64": "401FF4C1-8222-5AB2-987E-AD712164A814",
+    "arm64ec": "28025E3A-AEE3-5516-8BB8-8FCD65D902D6"
+  }
+}

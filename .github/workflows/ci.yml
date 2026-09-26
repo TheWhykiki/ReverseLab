@@ -173,6 +173,13 @@ jobs:
         run: >
           cmake -S . -B ${{ matrix.build_dir }} -G "${{ matrix.generator }}"
           -A ${{ matrix.platform }}
+      - name: Check native updater APIs before the full plugin build
+        shell: pwsh
+        run: |
+          cmake --build ${{ matrix.build_dir }} --config Release --target ReverseLabWindowsUpdaterSelfTests --parallel 2
+          if ($LASTEXITCODE -ne 0) { throw "Native updater self-test build failed" }
+          ctest --test-dir ${{ matrix.build_dir }} -C Release --output-on-failure --no-tests=error -R '^ReverseLabWindowsUpdaterSelfTest$'
+          if ($LASTEXITCODE -ne 0) { throw "Native updater API self-test failed" }
       - name: Build
         run: cmake --build ${{ matrix.build_dir }} --config Release --parallel 2
       - name: Compile Windows updater safety and production shapes

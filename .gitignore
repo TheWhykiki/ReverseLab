@@ -1,8 +1,15 @@
 /build/
+/build*/
 /dist/
+__pycache__/
+*.py[cod]
 /build-host/
 /TestArtifacts/
 /*.wav
 /.DS_Store
 *.xcuserstate
 xcuserdata/
+
+/build-presets/
+/build-review-*/
+/build-updater/

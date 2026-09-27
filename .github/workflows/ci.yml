@@ -169,6 +169,9 @@ jobs:
           }
       - name: Verify factory bank
         run: python scripts/generate-presets.py --check
+      - name: Check native Windows Installer COM mutations before compilation
+        shell: pwsh
+        run: pwsh -NoLogo -NoProfile -NonInteractive -File scripts/tests/test_windows_msi_com.ps1
       - name: Configure
         run: >
           cmake -S . -B ${{ matrix.build_dir }} -G "${{ matrix.generator }}"
